@@ -24,6 +24,8 @@ import { HyoStatusBar } from "./HyoStatusBar";
 import type { ChatProvider } from "../providers/types";
 
 let renderer: ReactTestRenderer | undefined;
+const originalDocument = (globalThis as any).document;
+const originalInnerHeight = (globalThis as any).innerHeight;
 
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -33,6 +35,10 @@ beforeEach(() => {
 afterEach(() => {
   if (renderer) act(() => renderer?.unmount());
   renderer = undefined;
+  if (originalDocument === undefined) delete (globalThis as any).document;
+  else (globalThis as any).document = originalDocument;
+  if (originalInnerHeight === undefined) delete (globalThis as any).innerHeight;
+  else (globalThis as any).innerHeight = originalInnerHeight;
 });
 
 describe("HyoStatusBar provider boundaries", () => {
@@ -74,5 +80,78 @@ describe("HyoStatusBar provider boundaries", () => {
 
     expect(useUsage).not.toHaveBeenCalled();
     expect(useAgents).not.toHaveBeenCalled();
+  });
+
+  it("positions the Codex context popup above the bar and dismisses it contextually", async () => {
+    let outsideClick: ((event: { target: unknown }) => void) | undefined;
+    const addEventListener = vi.fn((event: string, listener: typeof outsideClick) => {
+      if (event === "mousedown") outsideClick = listener;
+    });
+    const removeEventListener = vi.fn();
+    (globalThis as any).document = { addEventListener, removeEventListener };
+    (globalThis as any).innerHeight = 900;
+    const onCompact = vi.fn();
+    const provider = {
+      id: "codex",
+      capabilities: {
+        approvals: true, questions: true, planReview: false, agents: true,
+        sessionHistory: true, sessionRename: true, compaction: true, recovery: false,
+        tokenUsage: true, models: true, skills: true, rateLimits: true, auth: true,
+      },
+      createRuntime: vi.fn(), listSessions: vi.fn(async () => []),
+      loadSession: vi.fn(async () => []), renameSession: vi.fn(async () => undefined),
+      recoverSession: vi.fn(async () => ({ success: false, linesRemoved: 0, capturedUserText: null })),
+      cleanup: vi.fn(),
+    } as ChatProvider;
+
+    await act(async () => {
+      renderer = create(<HyoStatusBar
+        provider={provider}
+        providerOptions={{ model: "", approvalPolicy: "on-request", sandboxMode: "workspace-write", networkAccess: false }}
+        model=""
+        permissionMode="manual"
+        agent=""
+        inputTokens={10_000}
+        voiceMode={false}
+        hasVoiceApiKey={false}
+        onModelChange={vi.fn()}
+        onPermissionModeChange={vi.fn()}
+        onAgentChange={vi.fn()}
+        onVoiceModeToggle={vi.fn()}
+        onCompact={onCompact}
+        onReasoningEffortChange={vi.fn()}
+        onApprovalPolicyChange={vi.fn()}
+        onSandboxModeChange={vi.fn()}
+        onNetworkAccessChange={vi.fn()}
+      />, {
+        createNodeMock: (element) =>
+          (element as React.ReactElement<{ className?: string }>).props.className === "hyo-status-bar"
+          ? {
+              getBoundingClientRect: () => ({ top: 700 }),
+              contains: () => false,
+            }
+          : {},
+      });
+      await Promise.resolve();
+    });
+
+    const toggle = () => renderer!.root
+      .findByProps({ className: "hyo-context-ring-btn" }).props.onClick();
+    act(toggle);
+    expect(renderer!.root.findByProps({ className: "hyo-context-popup" }).props.style.bottom)
+      .toBe(206);
+    expect(addEventListener).toHaveBeenCalledWith("mousedown", expect.any(Function));
+
+    act(() => outsideClick?.({ target: {} }));
+    expect(renderer!.root.findAllByProps({ className: "hyo-context-popup" })).toHaveLength(0);
+
+    act(toggle);
+    act(() => renderer!.root.findByProps({ className: "hyo-compact-now-btn" }).props.onClick());
+    expect(onCompact).toHaveBeenCalledTimes(1);
+    expect(renderer!.root.findAllByProps({ className: "hyo-context-popup" })).toHaveLength(0);
+
+    act(toggle);
+    act(toggle);
+    expect(renderer!.root.findAllByProps({ className: "hyo-context-popup" })).toHaveLength(0);
   });
 });

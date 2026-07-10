@@ -555,6 +555,8 @@ function CodexHyoStatusBar({
   onNetworkAccessChange,
 }: HyoStatusBarProps) {
   const [contextOpen, setContextOpen] = useState(false);
+  const [popupBottom, setPopupBottom] = useState(0);
+  const statusBarRef = useRef<HTMLDivElement>(null);
   const contextLimit = Math.max(contextWindow ?? 0, getContextLimit(model));
   const contextPct = inputTokens > 0
     ? Math.min(100, (inputTokens / contextLimit) * 100)
@@ -563,8 +565,34 @@ function CodexHyoStatusBar({
     ? "danger"
     : contextPct > 50 ? "warning" : "";
 
+  const toggleContext = () => {
+    if (contextOpen) {
+      setContextOpen(false);
+      return;
+    }
+    if (statusBarRef.current) {
+      const rect = statusBarRef.current.getBoundingClientRect();
+      setPopupBottom(globalThis.innerHeight - rect.top + 6);
+    }
+    setContextOpen(true);
+  };
+
+  useEffect(() => {
+    if (!contextOpen) return;
+    const dismissOutside = (event: MouseEvent) => {
+      if (
+        statusBarRef.current &&
+        !statusBarRef.current.contains(event.target as Node)
+      ) {
+        setContextOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", dismissOutside);
+    return () => document.removeEventListener("mousedown", dismissOutside);
+  }, [contextOpen]);
+
   return (
-    <div className="hyo-status-bar">
+    <div className="hyo-status-bar" ref={statusBarRef}>
       {inputTokens > 0 && (
         <ContextRing
           pct={contextPct}
@@ -572,8 +600,8 @@ function CodexHyoStatusBar({
           inputTokens={inputTokens}
           contextLimit={contextLimit}
           open={contextOpen}
-          popupBottom={0}
-          onToggle={() => setContextOpen((open) => !open)}
+          popupBottom={popupBottom}
+          onToggle={toggleContext}
           onCompact={() => {
             onCompact();
             setContextOpen(false);
