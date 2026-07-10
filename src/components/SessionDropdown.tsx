@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import type { PastSession } from "../session-parser";
+import type { ProviderSessionSummary as PastSession } from "../providers/types";
 
 interface SessionDropdownProps {
   pastSessions: PastSession[];

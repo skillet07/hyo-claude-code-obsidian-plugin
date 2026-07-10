@@ -4,8 +4,8 @@ import { ToolCall } from "./ToolCall";
 import { AskQuestion } from "./AskQuestion";
 import { PlanReview } from "./PlanReview";
 import { MarkdownBlock, stripInlineThinkingTags } from "./MarkdownBlock";
-import type { Message } from "../hooks/useChatEngine";
-import { HIDDEN_TOOLS } from "../hooks/useChatEngine";
+import type { Message } from "../chat-types";
+import { HIDDEN_TOOLS } from "../chat-types";
 import { THINKING_BLOCK_ERROR_RE } from "../session-repair";
 
 interface ChatMessageProps {

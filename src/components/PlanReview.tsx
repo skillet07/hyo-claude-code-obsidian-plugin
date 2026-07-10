@@ -1,7 +1,7 @@
 import React from "react";
 import type { App } from "obsidian";
 import { MarkdownBlock } from "./MarkdownBlock";
-import type { PlanReviewData } from "../hooks/useChatEngine";
+import type { PlanReviewData } from "../chat-types";
 
 interface PlanReviewProps {
   app: App;

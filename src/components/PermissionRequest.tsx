@@ -1,5 +1,5 @@
 import React from "react";
-import type { PermissionRequestData } from "../hooks/useChatEngine";
+import type { PermissionRequestData } from "../chat-types";
 
 interface PermissionRequestProps {
   request: PermissionRequestData;

@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from "react";
-import type { AskQuestionData } from "../hooks/useChatEngine";
+import type { AskQuestionData } from "../chat-types";
 
 interface AskQuestionProps {
   question: AskQuestionData;

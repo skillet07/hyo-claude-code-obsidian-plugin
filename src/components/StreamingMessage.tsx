@@ -5,8 +5,8 @@ import { PermissionRequest } from "./PermissionRequest";
 import { AskQuestion } from "./AskQuestion";
 import { PlanReview } from "./PlanReview";
 import { MarkdownBlock } from "./MarkdownBlock";
-import type { Message } from "../hooks/useChatEngine";
-import { HIDDEN_TOOLS } from "../hooks/useChatEngine";
+import type { Message } from "../chat-types";
+import { HIDDEN_TOOLS } from "../chat-types";
 
 interface StreamingMessageProps {
   app: App;

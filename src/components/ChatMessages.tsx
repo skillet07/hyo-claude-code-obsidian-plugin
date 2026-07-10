@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from "react";
 import type { App } from "obsidian";
 import { ChatMessage } from "./ChatMessage";
 import { StreamingMessage } from "./StreamingMessage";
-import type { Message } from "../hooks/useChatEngine";
+import type { Message } from "../chat-types";
 
 interface ChatMessagesProps {
   app: App;
