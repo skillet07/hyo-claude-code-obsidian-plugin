@@ -14,6 +14,10 @@ import type {
   ProviderRuntime,
   ProviderSessionSummary,
 } from "../providers/types";
+import {
+  SessionLifecycle,
+  type RuntimeLease,
+} from "./session-lifecycle";
 
 // Re-export for convenience
 export type PastSession = ProviderSessionSummary;
@@ -208,21 +212,19 @@ export function useSessionManager(options: SessionManagerOptions) {
 
   const [pastSessions, setPastSessions] = useState<ProviderSessionSummary[]>([]);
 
-  const runtimesRef = useRef<Record<string, ProviderRuntime>>({});
+  const lifecycleRef = useRef(new SessionLifecycle<ProviderRuntime>());
   const streamStatesRef = useRef<Record<string, StreamState>>({});
   const scrollRef = useRef({ nearBottom: true });
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  // Cleanup transports on unmount
+  // The session lifecycle is the single cleanup owner for runtimes created by
+  // this hook. Each runtime unregisters itself from its provider when cleaned.
   useEffect(() => {
     return () => {
-      for (const id of Object.keys(runtimesRef.current)) {
-        runtimesRef.current[id]?.cleanup();
-      }
-      provider.cleanup();
+      lifecycleRef.current.cleanupAll();
     };
-  }, [provider]);
+  }, []);
 
   // ------- internal helpers -------
 
@@ -247,13 +249,17 @@ export function useSessionManager(options: SessionManagerOptions) {
   );
 
   const makeProcessEvent = useCallback(
-    (tabId: string) => (event: ProviderEvent) => {
+    (tabId: string, lease: RuntimeLease) => (event: ProviderEvent) => {
+      const lifecycle = lifecycleRef.current;
+      if (!lifecycle.ownsRuntime(lease)) return;
+
       if (event.type === "error") {
         console.error("[hyo] Provider error:", event.message);
         return;
       }
 
       if (event.type === "closed") {
+        if (!lifecycle.releaseRuntime(lease)) return;
         const wasGenerating = stateRef.current.tabs.find(
           (tab) => tab.id === tabId,
         )?.generating;
@@ -282,7 +288,6 @@ export function useSessionManager(options: SessionManagerOptions) {
             ),
           }));
         }
-        delete runtimesRef.current[tabId];
         return;
       }
 
@@ -353,7 +358,7 @@ export function useSessionManager(options: SessionManagerOptions) {
             skillResultPending: false,
           };
           setTimeout(() => {
-            runtimesRef.current[tabId]?.send(
+            lifecycleRef.current.getRuntime(tabId)?.send(
               "Please continue where you left off before the compaction.",
             );
           }, 100);
@@ -363,7 +368,7 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       if (event.type === "approval_requested") {
         if (event.autoApprove) {
-          runtimesRef.current[tabId]?.respondApproval(
+          lifecycleRef.current.getRuntime(tabId)?.respondApproval(
             event.requestId,
             "allow",
           );
@@ -404,6 +409,7 @@ export function useSessionManager(options: SessionManagerOptions) {
       }
 
       if (event.type === "turn_completed") {
+        lifecycle.finishTurn(tabId);
         updateTabLastAssistant(tabId, () => ({ streaming: false }));
         setState((prev) => ({
           ...prev,
@@ -582,8 +588,7 @@ export function useSessionManager(options: SessionManagerOptions) {
   }, [options.model, options.permissionMode]);
 
   const closeTab = useCallback((tabIdToClose: string) => {
-    runtimesRef.current[tabIdToClose]?.cleanup();
-    delete runtimesRef.current[tabIdToClose];
+    lifecycleRef.current.cleanupRuntime(tabIdToClose);
     delete streamStatesRef.current[tabIdToClose];
 
     setState((prev) => {
@@ -653,6 +658,8 @@ export function useSessionManager(options: SessionManagerOptions) {
   const sendMessage = useCallback(
     (content: string | any[], meta?: { displayText?: string; attachedFileNames?: string[]; isCompaction?: boolean }) => {
       const tabId = stateRef.current.activeTabId;
+      const lifecycle = lifecycleRef.current;
+      if (!lifecycle.beginTurn(tabId)) return;
 
       // For display, use the typed text; for arrays (image messages) use displayText or placeholder
       const displayContent = typeof content === "string"
@@ -707,13 +714,13 @@ export function useSessionManager(options: SessionManagerOptions) {
       }));
       scrollRef.current.nearBottom = true;
 
-      if (
-        !runtimesRef.current[tabId] ||
-        !runtimesRef.current[tabId].isRunning()
-      ) {
+      let runtime = lifecycle.getRuntime(tabId);
+      if (runtime && !runtime.isRunning()) runtime = undefined;
+      if (!runtime) {
         const currentTab = stateRef.current.tabs.find((tab) => tab.id === tabId);
         const providerSessionId = currentTab?.providerSessionId;
-        const runtime = provider.createRuntime({
+        let dispatchEvent: (event: ProviderEvent) => void = () => {};
+        runtime = provider.createRuntime({
           cwd: options.cwd,
           model: currentTab?.model || options.model,
           permissionMode: currentTab?.permissionMode || options.permissionMode,
@@ -721,13 +728,24 @@ export function useSessionManager(options: SessionManagerOptions) {
           providerSessionId: providerSessionId || undefined,
           resume: !!providerSessionId,
           maxOutputTokens: options.maxOutputTokens,
-          onEvent: makeProcessEvent(tabId),
+          onEvent: (event) => dispatchEvent(event),
         });
-        runtime.start();
-        runtimesRef.current[tabId] = runtime;
+        const lease = lifecycle.attachRuntime(tabId, runtime);
+        dispatchEvent = makeProcessEvent(tabId, lease);
+        try {
+          runtime.start();
+        } catch (error) {
+          lifecycle.cleanupRuntime(tabId);
+          throw error;
+        }
       }
 
-      runtimesRef.current[tabId].send(content);
+      try {
+        runtime.send(content);
+      } catch (error) {
+        lifecycle.finishTurn(tabId);
+        throw error;
+      }
     },
     [options, makeProcessEvent, provider]
   );
@@ -740,7 +758,7 @@ export function useSessionManager(options: SessionManagerOptions) {
       const tab = stateRef.current.tabs.find((t) => t.id === tabId);
       const lastMsg = tab?.messages[tab.messages.length - 1];
       const toolName = lastMsg?.permissionRequest?.toolName;
-      runtimesRef.current[tabId]?.respondApproval(
+      lifecycleRef.current.getRuntime(tabId)?.respondApproval(
         requestId,
         behavior,
         toolName,
@@ -783,7 +801,7 @@ export function useSessionManager(options: SessionManagerOptions) {
       // Send control_response with questions + answers as updatedInput.
       // The CLI was blocked on the control_request — this unblocks it.
       // Claude receives the answers and continues within the same turn.
-      runtimesRef.current[tabId]?.respondQuestion(
+      lifecycleRef.current.getRuntime(tabId)?.respondQuestion(
         questionId,
         questions,
         answers,
@@ -798,7 +816,7 @@ export function useSessionManager(options: SessionManagerOptions) {
 
   const stopGeneration = useCallback(() => {
     const tabId = stateRef.current.activeTabId;
-    runtimesRef.current[tabId]?.interrupt();
+    lifecycleRef.current.getRuntime(tabId)?.interrupt();
     setState((prev) => ({
       ...prev,
       tabs: prev.tabs.map((tab) =>
@@ -843,8 +861,7 @@ export function useSessionManager(options: SessionManagerOptions) {
     // Next sendMessage will respawn with the new --agent flag.
     setState((prev) => {
       const tabId = prev.activeTabId;
-      runtimesRef.current[tabId]?.cleanup();
-      delete runtimesRef.current[tabId];
+      lifecycleRef.current.cleanupRuntime(tabId);
       delete streamStatesRef.current[tabId];
       return {
         ...prev,
@@ -950,12 +967,11 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       // Kill the existing transport so the next sendMessage spawns a fresh
       // process that --resumes against the cleaned file.
-      const existing = runtimesRef.current[tabId];
+      const existing = lifecycleRef.current.getRuntime(tabId);
       if (existing) {
         try {
-          existing.cleanup();
+          lifecycleRef.current.cleanupRuntime(tabId);
         } catch {}
-        delete runtimesRef.current[tabId];
       }
 
       // Strip the corrupt trailing messages from the in-memory state so the

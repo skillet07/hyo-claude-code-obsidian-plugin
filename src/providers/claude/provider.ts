@@ -18,6 +18,7 @@ import type {
   ProviderRuntime,
   ProviderRuntimeOptions,
 } from "../types";
+import { RuntimePool, type RuntimePoolHandle } from "../runtime-pool";
 import { ClaudeEventNormalizer } from "./event-normalizer";
 
 const CLAUDE_CAPABILITIES: ProviderCapabilities = {
@@ -51,8 +52,13 @@ class ClaudeRuntime implements ProviderRuntime {
   readonly providerId = "claude" as const;
   ready = false;
   private readonly transport: ClaudeTransport;
+  private readonly poolHandle: RuntimePoolHandle;
 
-  constructor(cliPath: string, options: ProviderRuntimeOptions) {
+  constructor(
+    cliPath: string,
+    options: ProviderRuntimeOptions,
+    pool: RuntimePool<ClaudeRuntime>,
+  ) {
     const normalizer = new ClaudeEventNormalizer(() => readPlanFile(options.cwd));
     const emit = (events: ReturnType<ClaudeEventNormalizer["normalize"]>) => {
       for (const event of events) {
@@ -73,8 +79,12 @@ class ClaudeRuntime implements ProviderRuntime {
       maxOutputTokens: options.maxOutputTokens,
       onMessage: (raw) => emit(normalizer.normalize(raw)),
       onError: (error) => emit(normalizer.normalizeError(error)),
-      onClose: (code) => emit(normalizer.normalizeClose(code)),
+      onClose: (code) => {
+        this.poolHandle.unregister();
+        emit(normalizer.normalizeClose(code));
+      },
     });
+    this.poolHandle = pool.register(this, () => this.transport.stop());
   }
 
   start(): void {
@@ -120,20 +130,18 @@ class ClaudeRuntime implements ProviderRuntime {
   }
 
   cleanup(): void {
-    this.transport.stop();
+    this.poolHandle.cleanup();
   }
 }
 
 export function createClaudeProvider(options: { cliPath: string }): ChatProvider {
-  const runtimes = new Set<ProviderRuntime>();
+  const runtimes = new RuntimePool<ClaudeRuntime>();
 
   return {
     id: "claude",
     capabilities: CLAUDE_CAPABILITIES,
     createRuntime(runtimeOptions) {
-      const runtime = new ClaudeRuntime(options.cliPath, runtimeOptions);
-      runtimes.add(runtime);
-      return runtime;
+      return new ClaudeRuntime(options.cliPath, runtimeOptions, runtimes);
     },
     listSessions(cwd) {
       return listPastSessions(cwd).map((session) => ({
@@ -159,8 +167,7 @@ export function createClaudeProvider(options: { cliPath: string }): ChatProvider
     },
     normalizeModelId,
     cleanup() {
-      for (const runtime of runtimes) runtime.cleanup();
-      runtimes.clear();
+      runtimes.cleanupAll();
     },
     isRecoverableError: isThinkingBlockApiError,
   };
