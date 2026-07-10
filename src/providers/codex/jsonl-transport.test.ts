@@ -15,6 +15,13 @@ function createTransport(options: ConstructorParameters<typeof JsonlTransport>[0
   return { lines, transport };
 }
 
+function captureError(promise: Promise<unknown>): Promise<unknown> {
+  return promise.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+}
+
 describe("JsonlTransport", () => {
   it("parses fragmented and coalesced newline-delimited messages", () => {
     const notifications: Array<{ method: string; params?: unknown }> = [];
@@ -61,6 +68,88 @@ describe("JsonlTransport", () => {
     expect(malformed[0]?.line).toBe("not json");
     expect(malformed[0]?.error).toBeInstanceOf(Error);
     expect(notifications).toEqual([{ method: "ready", params: {} }]);
+  });
+
+  it("reports a response with no result or error without settling its request", async () => {
+    vi.useFakeTimers();
+    const malformed: Array<{ line: string; error: Error }> = [];
+    const { transport } = createTransport({
+      requestTimeoutMs: 25,
+      onMalformedLine: (line, error) => malformed.push({ line, error }),
+    });
+    const pending = transport.request("thread/list", {}, { id: 1 });
+    const error = captureError(pending);
+
+    transport.push('{"id":1}\n');
+
+    expect(malformed).toHaveLength(1);
+    expect(malformed[0]?.line).toBe('{"id":1}');
+    await vi.advanceTimersByTimeAsync(25);
+    expect(await error).toBeInstanceOf(JsonRpcTimeoutError);
+    vi.useRealTimers();
+  });
+
+  it("reports a non-string method without settling a matching request", async () => {
+    vi.useFakeTimers();
+    const malformed: Array<{ line: string; error: Error }> = [];
+    const { transport } = createTransport({
+      requestTimeoutMs: 25,
+      onMalformedLine: (line, error) => malformed.push({ line, error }),
+    });
+    const pending = transport.request("thread/list", {}, { id: 1 });
+    const error = captureError(pending);
+
+    transport.push('{"id":1,"method":42}\n');
+
+    expect(malformed).toHaveLength(1);
+    expect(malformed[0]?.line).toBe('{"id":1,"method":42}');
+    await vi.advanceTimersByTimeAsync(25);
+    expect(await error).toBeInstanceOf(JsonRpcTimeoutError);
+    vi.useRealTimers();
+  });
+
+  it("reports a method-bearing response without settling its request", async () => {
+    vi.useFakeTimers();
+    const malformed: string[] = [];
+    const { transport } = createTransport({
+      requestTimeoutMs: 25,
+      onMalformedLine: (line) => malformed.push(line),
+    });
+    const pending = transport.request("thread/list", {}, { id: 1 });
+    const error = captureError(pending);
+
+    transport.push('{"id":1,"method":"thread/list","result":[]}\n');
+
+    expect(malformed).toEqual([
+      '{"id":1,"method":"thread/list","result":[]}',
+    ]);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(await error).toBeInstanceOf(JsonRpcTimeoutError);
+    vi.useRealTimers();
+  });
+
+  it("reports responses with both result and error or an unusable error", async () => {
+    vi.useFakeTimers();
+    const malformed: string[] = [];
+    const { transport } = createTransport({
+      requestTimeoutMs: 25,
+      onMalformedLine: (line) => malformed.push(line),
+    });
+    const first = transport.request("first", {}, { id: 1 });
+    const second = transport.request("second", {}, { id: 2 });
+    const firstError = captureError(first);
+    const secondError = captureError(second);
+
+    transport.push(
+      '{"id":1,"result":"ok","error":{"code":-1,"message":"bad"}}\n' +
+        '{"id":2,"error":{"code":"bad","message":42}}\n',
+    );
+
+    expect(malformed).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(await firstError).toBeInstanceOf(JsonRpcTimeoutError);
+    expect(await secondError).toBeInstanceOf(JsonRpcTimeoutError);
+    vi.useRealTimers();
   });
 
   it("correlates numeric and string response IDs without collisions", async () => {
@@ -139,20 +228,28 @@ describe("JsonlTransport", () => {
     });
   });
 
-  it("rejects every pending request on dispose and refuses new work", async () => {
+  it("preserves an Error reason when rejecting pending and later work", async () => {
     const { transport } = createTransport();
     const first = transport.request("first", {});
     const second = transport.request("second", {});
+    const firstError = captureError(first);
+    const secondError = captureError(second);
+    const reason = new Error("process exited");
 
-    transport.dispose(new Error("process exited"));
+    transport.dispose(reason);
 
-    await expect(first).rejects.toMatchObject({
-      name: "JsonRpcTransportClosedError",
-      message: "process exited",
-    });
-    await expect(second).rejects.toBeInstanceOf(JsonRpcTransportClosedError);
-    await expect(transport.request("later", {})).rejects.toBeInstanceOf(
-      JsonRpcTransportClosedError,
-    );
+    expect(await firstError).toBe(reason);
+    expect(await secondError).toBe(reason);
+    expect(await captureError(transport.request("later", {}))).toBe(reason);
+  });
+
+  it("uses a closed error when disposed without a reason", async () => {
+    const { transport } = createTransport();
+    const pending = transport.request("pending", {});
+    const error = captureError(pending);
+
+    transport.dispose();
+
+    expect(await error).toBeInstanceOf(JsonRpcTransportClosedError);
   });
 });

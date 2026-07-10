@@ -24,7 +24,6 @@ export interface JsonRpcRequestOptions {
 }
 
 interface PendingRequest {
-  method: string;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -34,8 +33,8 @@ interface ResponseMessage {
   id: RequestId;
   result?: unknown;
   error?: {
-    code?: number;
-    message?: string;
+    code: number;
+    message: string;
     data?: unknown;
   };
 }
@@ -73,7 +72,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export class JsonlTransport {
   private buffer = "";
   private readonly decoder = new StringDecoder("utf8");
-  private disposedError: JsonRpcTransportClosedError | undefined;
+  private disposedError: Error | undefined;
   private nextRequestId = 1;
   private readonly pending = new Map<RequestId, PendingRequest>();
   private readonly writeLine: (line: string) => void;
@@ -119,7 +118,6 @@ export class JsonlTransport {
         reject(new JsonRpcTimeoutError(method, timeoutMs));
       }, timeoutMs);
       this.pending.set(id, {
-        method,
         resolve: resolve as (value: unknown) => void,
         reject,
         timer,
@@ -164,9 +162,7 @@ export class JsonlTransport {
 
   dispose(reason?: Error): void {
     if (this.disposedError) return;
-    this.disposedError = new JsonRpcTransportClosedError(
-      reason?.message ?? "Codex app-server transport is closed",
-    );
+    this.disposedError = reason ?? new JsonRpcTransportClosedError();
     this.buffer = "";
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
@@ -192,10 +188,31 @@ export class JsonlTransport {
       return;
     }
 
-    if ("method" in message && typeof message.method === "string") {
-      if ("id" in message && isRequestId(message.id)) {
+    const hasMethod = hasOwn(message, "method");
+    const hasId = hasOwn(message, "id");
+    const hasResult = hasOwn(message, "result");
+    const hasError = hasOwn(message, "error");
+
+    if (hasMethod) {
+      if (typeof message.method !== "string") {
+        this.reportMalformed(line, "JSONL message method must be a string");
+        return;
+      }
+      if (hasResult || hasError) {
+        this.reportMalformed(
+          line,
+          "JSONL request or notification cannot contain result or error",
+        );
+        return;
+      }
+      if (hasId && !isRequestId(message.id)) {
+        this.reportMalformed(line, "JSONL request id must be a string or number");
+        return;
+      }
+
+      if (hasId) {
         void this.handleServerRequest({
-          id: message.id,
+          id: message.id as RequestId,
           method: message.method,
           ...(message.params === undefined ? {} : { params: message.params }),
         });
@@ -208,16 +225,30 @@ export class JsonlTransport {
       return;
     }
 
-    if ("id" in message && isRequestId(message.id)) {
-      this.handleResponse({
-        id: message.id,
-        ...(message.result === undefined ? {} : { result: message.result }),
-        ...(isRecord(message.error) ? { error: message.error } : {}),
-      });
+    if (!hasId || !isRequestId(message.id)) {
+      this.reportMalformed(line, "JSONL response id must be a string or number");
+      return;
+    }
+    if (hasResult === hasError) {
+      this.reportMalformed(
+        line,
+        "JSONL response must contain exactly one of result or error",
+      );
+      return;
+    }
+    if (hasError && !isResponseError(message.error)) {
+      this.reportMalformed(
+        line,
+        "JSONL response error must contain a numeric code and string message",
+      );
       return;
     }
 
-    this.options.onMalformedLine?.(line, new Error("Unrecognized JSONL message shape"));
+    this.handleResponse({
+      id: message.id,
+      ...(hasResult ? { result: message.result } : {}),
+      ...(hasError ? { error: message.error as ResponseMessage["error"] } : {}),
+    });
   }
 
   private handleResponse(response: ResponseMessage): void {
@@ -229,8 +260,8 @@ export class JsonlTransport {
     if (response.error) {
       pending.reject(
         new JsonRpcRemoteError(
-          response.error.code ?? -32603,
-          response.error.message ?? `Codex app-server request "${pending.method}" failed`,
+          response.error.code,
+          response.error.message,
           response.error.data,
         ),
       );
@@ -260,6 +291,10 @@ export class JsonlTransport {
   private write(message: object): void {
     this.writeLine(`${JSON.stringify(message)}\n`);
   }
+
+  private reportMalformed(line: string, message: string): void {
+    this.options.onMalformedLine?.(line, new Error(message));
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -268,6 +303,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isRequestId(value: unknown): value is RequestId {
   return typeof value === "string" || typeof value === "number";
+}
+
+function hasOwn(value: object, property: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, property);
+}
+
+function isResponseError(
+  value: unknown,
+): value is NonNullable<ResponseMessage["error"]> {
+  return (
+    isRecord(value) &&
+    typeof value.code === "number" &&
+    Number.isFinite(value.code) &&
+    typeof value.message === "string"
+  );
 }
 
 function asError(value: unknown): Error {

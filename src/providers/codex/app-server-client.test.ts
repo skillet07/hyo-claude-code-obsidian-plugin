@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CodexAppServerProcess } from "./app-server-process";
 import {
   CodexAppServerClient,
+  CodexAppServerExitedError,
   createProcessTransport,
   type RpcPeer,
 } from "./app-server-client";
@@ -152,11 +153,14 @@ describe("CodexAppServerClient", () => {
     };
     const transport = createProcessTransport(process);
     const pending = transport.request("thread/list", {});
-    const rejection = expect(pending).rejects.toThrow(/exited.*code 9.*fatal stderr/i);
+    const rejection = pending.catch((error: unknown) => error);
+    const exit = { code: 9, signal: null, stderr: "fatal stderr" } as const;
 
-    resolveExit({ code: 9, signal: null, stderr: "fatal stderr" });
+    resolveExit(exit);
 
-    await rejection;
+    const error = await rejection;
+    expect(error).toBeInstanceOf(CodexAppServerExitedError);
+    expect(error).toMatchObject({ exit });
     expect(writes).toHaveLength(1);
   });
 });
