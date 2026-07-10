@@ -9,7 +9,9 @@ import { randomUUID } from "crypto";
 // normalized here, right at the CLI boundary, so it can never silently
 // degrade context again.
 export function normalizeModelId(id: string): string {
-  if (id.startsWith("claude-sonnet-5") && id.includes("[1m]")) {
+  const isSonnet5 =
+    id === "claude-sonnet-5[1m]" || id.startsWith("claude-sonnet-5-");
+  if (isSonnet5 && id.includes("[1m]")) {
     return "claude-sonnet-5";
   }
   return id;

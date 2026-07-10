@@ -1,4 +1,5 @@
 import React, { useState, useCallback } from "react";
+import type { App } from "obsidian";
 import { ToolCall } from "./ToolCall";
 import { AskQuestion } from "./AskQuestion";
 import { PlanReview } from "./PlanReview";
@@ -8,13 +9,14 @@ import { HIDDEN_TOOLS } from "../hooks/useChatEngine";
 import { THINKING_BLOCK_ERROR_RE } from "../session-repair";
 
 interface ChatMessageProps {
+  app: App;
   message: Message;
   onRecover?: () => void;
   onPermissionResponse?: (requestId: string, behavior: "allow" | "allow_always" | "deny") => void;
   onQuestionAnswer?: (questionId: string, answers: Record<string, string>) => void;
 }
 
-export function ChatMessage({ message, onRecover, onPermissionResponse, onQuestionAnswer }: ChatMessageProps) {
+export function ChatMessage({ app, message, onRecover, onPermissionResponse, onQuestionAnswer }: ChatMessageProps) {
   if (message.isCompaction) {
     return <CompactionMessage message={message} />;
   }
@@ -24,6 +26,7 @@ export function ChatMessage({ message, onRecover, onPermissionResponse, onQuesti
   if (message.role === "assistant") {
     return (
       <AssistantMessage
+        app={app}
         message={message}
         onRecover={onRecover}
         onPermissionResponse={onPermissionResponse}
@@ -128,7 +131,8 @@ function isThinkingBlockErrorContent(text: string): boolean {
   return THINKING_BLOCK_ERROR_RE.test(text);
 }
 
-function AssistantMessage({ message, onRecover, onPermissionResponse, onQuestionAnswer }: {
+function AssistantMessage({ app, message, onRecover, onPermissionResponse, onQuestionAnswer }: {
+  app: App;
   message: Message;
   onRecover?: () => void;
   onPermissionResponse?: (requestId: string, behavior: "allow" | "allow_always" | "deny") => void;
@@ -169,7 +173,7 @@ function AssistantMessage({ message, onRecover, onPermissionResponse, onQuestion
     return (
       <div className="hyo-message hyo-message-assistant">
         <div className="hyo-message-content">
-          <MarkdownBlock content={message.content} />
+          <MarkdownBlock app={app} content={message.content} />
         </div>
         {showRecover && onRecover && <RecoverBanner onRecover={onRecover} />}
         {!message.streaming && (
@@ -195,7 +199,7 @@ function AssistantMessage({ message, onRecover, onPermissionResponse, onQuestion
           }
           if (block.type === "text") {
             if (block.isSkillOutput || skillTurnIndices.has(block.turnIndex)) return null;
-            return <MarkdownBlock key={i} content={block.content || ""} />;
+            return <MarkdownBlock key={i} app={app} content={block.content || ""} />;
           }
           if (block.type === "tool") {
             const tool = toolCalls.find((t) => t.id === block.toolId);
@@ -214,12 +218,14 @@ function AssistantMessage({ message, onRecover, onPermissionResponse, onQuestion
 
         {message.planReview && !message.planReview.resolved && onPermissionResponse && (
           <PlanReview
+            app={app}
             review={message.planReview}
             onRespond={onPermissionResponse}
           />
         )}
         {message.planReview?.resolved && (
           <PlanReview
+            app={app}
             review={message.planReview}
             onRespond={() => {}}
           />

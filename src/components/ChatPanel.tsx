@@ -505,6 +505,7 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
 
       {activeMessages.length > 0 ? (
         <ChatMessages
+          app={app}
           messages={activeMessages}
           scrollRef={scrollRef}
           onPermissionResponse={sendPermissionResponse}

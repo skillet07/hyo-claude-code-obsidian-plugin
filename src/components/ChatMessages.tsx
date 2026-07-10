@@ -1,9 +1,11 @@
 import React, { useEffect, useRef } from "react";
+import type { App } from "obsidian";
 import { ChatMessage } from "./ChatMessage";
 import { StreamingMessage } from "./StreamingMessage";
 import type { Message } from "../hooks/useChatEngine";
 
 interface ChatMessagesProps {
+  app: App;
   messages: Message[];
   scrollRef: React.MutableRefObject<{ nearBottom: boolean }>;
   onPermissionResponse: (requestId: string, behavior: "allow" | "allow_always" | "deny") => void;
@@ -12,6 +14,7 @@ interface ChatMessagesProps {
 }
 
 export function ChatMessages({
+  app,
   messages,
   scrollRef,
   onPermissionResponse,
@@ -48,6 +51,7 @@ export function ChatMessages({
           return (
             <StreamingMessage
               key={`stream-${i}`}
+              app={app}
               message={msg}
               onPermissionResponse={onPermissionResponse}
               onQuestionAnswer={onQuestionAnswer}
@@ -67,6 +71,7 @@ export function ChatMessages({
         return (
           <ChatMessage
             key={`msg-${i}`}
+            app={app}
             message={msg}
             onRecover={onRecover}
             onPermissionResponse={onPermissionResponse}

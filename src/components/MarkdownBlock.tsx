@@ -1,7 +1,8 @@
 import React, { useRef, useEffect } from "react";
-import { MarkdownRenderer, Component } from "obsidian";
+import { MarkdownRenderer, Component, type App } from "obsidian";
 
 interface MarkdownBlockProps {
+  app: App;
   content: string;
   sourcePath?: string;
 }
@@ -15,7 +16,7 @@ export function stripInlineThinkingTags(text: string): string {
     .replace(/<thinking>[\s\S]*$/, "");
 }
 
-export function MarkdownBlock({ content, sourcePath = "" }: MarkdownBlockProps) {
+export function MarkdownBlock({ app, content, sourcePath = "" }: MarkdownBlockProps) {
   const ref = useRef<HTMLDivElement>(null);
   const componentRef = useRef<Component | null>(null);
 
@@ -38,7 +39,7 @@ export function MarkdownBlock({ content, sourcePath = "" }: MarkdownBlockProps) 
         componentRef.current
       );
     }
-  }, [content, sourcePath]);
+  }, [app, content, sourcePath]);
 
   return <div ref={ref} className="hyo-markdown-body" />;
 }

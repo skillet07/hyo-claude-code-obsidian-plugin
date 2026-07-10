@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "release": "node esbuild.config.mjs production && echo '✓ Built. Now run: gh release create VERSION main.js manifest.json styles.css --title TITLE --notes NOTES'"
   },
   "dependencies": {
@@ -19,6 +22,7 @@
     "@types/react-dom": "^19.1.0",
     "esbuild": "^0.25.0",
     "obsidian": "latest",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.10"
   }
 }
