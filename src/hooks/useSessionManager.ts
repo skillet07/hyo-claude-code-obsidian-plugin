@@ -957,8 +957,9 @@ export function useSessionManager(options: SessionManagerOptions) {
     const tab = stateRef.current.tabs.find((item) => item.id === id);
     if (tab?.providerSessionId) {
       const provider = resolveProvider(tab.providerId);
+      const cwd = tab.runtimeConfiguration?.cwd ?? options.cwd;
       void provider
-        .renameSession(options.cwd, tab.providerSessionId, title)
+        .renameSession(cwd, tab.providerSessionId, title)
         .then(() => refreshPastSessions(tab.providerId))
         .catch((error) => {
           console.error("[hyo] Failed to rename session:", error);
@@ -1481,7 +1482,7 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       const provider = resolveProvider(tab.providerId);
       const result = await provider.recoverSession(
-        options.cwd,
+        tab.runtimeConfiguration?.cwd ?? options.cwd,
         tab.providerSessionId,
       );
       if (!result.success) return result;

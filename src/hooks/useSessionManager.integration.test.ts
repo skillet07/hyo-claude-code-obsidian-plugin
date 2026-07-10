@@ -117,6 +117,8 @@ class FakeProvider implements ChatProvider {
   cleanupCalls = 0;
   renameCalls: Array<{ sessionId: string; title: string }> = [];
   recoverCalls: string[] = [];
+  renameCwds: string[] = [];
+  recoverCwds: string[] = [];
 
   constructor(
     private readonly runtimeProviderId: ProviderId = "claude",
@@ -140,11 +142,13 @@ class FakeProvider implements ChatProvider {
     return this.history;
   }
 
-  async renameSession(_cwd: string, sessionId: string, title: string): Promise<void> {
+  async renameSession(cwd: string, sessionId: string, title: string): Promise<void> {
+    this.renameCwds.push(cwd);
     this.renameCalls.push({ sessionId, title });
   }
 
-  async recoverSession(_cwd: string, sessionId: string) {
+  async recoverSession(cwd: string, sessionId: string) {
+    this.recoverCwds.push(cwd);
     this.recoverCalls.push(sessionId);
     return { success: false, linesRemoved: 0, capturedUserText: null };
   }
@@ -265,6 +269,28 @@ describe("useSessionManager lifecycle integration", () => {
     expect(provider.runtimeOptions[2]).toMatchObject({
       cwd: "/new/project", maxOutputTokens: 64000,
     });
+  });
+
+  it("uses the tab cwd snapshot for rename and recovery after settings change", async () => {
+    const provider = new FakeProvider("claude");
+    provider.history = [{ role: "assistant", content: "history" }];
+    const past: ProviderSessionSummary = {
+      providerId: "claude", id: "old-session", title: "Old", date: new Date(),
+    };
+    await mount("unused", { providers: [provider], cwd: "/old/project" });
+    await act(async () => manager.openPastSession(past));
+    const oldTabId = manager.activeTabId;
+
+    await act(async () => {
+      renderer!.update(React.createElement(Harness, {
+        cliPath: "unused", providers: [provider], cwd: "/new/project",
+      }));
+    });
+    act(() => manager.renameTab(oldTabId, "Renamed"));
+    await act(async () => manager.recoverSession(oldTabId));
+
+    expect(provider.renameCwds).toEqual(["/old/project"]);
+    expect(provider.recoverCwds).toEqual(["/old/project"]);
   });
   it("keeps an unspecified Claude error nonterminal and rejects an overlapping send", async () => {
     const provider = new FakeProvider("claude");

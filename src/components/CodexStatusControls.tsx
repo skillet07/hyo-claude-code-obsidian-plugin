@@ -200,7 +200,7 @@ export function CodexStatusControls({
     setPollFailed(false);
     try {
       setError("");
-      const result = await start(method);
+      const result = await start.call(target, method);
       if (!isCurrent(target, generation)) {
         if (result.type !== "complete") {
           void target.cancelLogin?.(result.loginId).catch(() => undefined);

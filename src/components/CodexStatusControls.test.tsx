@@ -120,6 +120,21 @@ describe("CodexStatusControls", () => {
     expect(open).toHaveBeenCalledWith("https://login", "_blank", "noopener");
   });
 
+  it("invokes provider login with its receiver intact", async () => {
+    const codex = provider();
+    (codex as any).receiverMarker = "bound";
+    codex.startLogin = async function (this: ChatProvider & { receiverMarker: string }) {
+      if (this.receiverMarker !== "bound") throw new Error("lost receiver");
+      return { type: "browser", loginId: "bound-login", url: "https://bound" };
+    } as ChatProvider["startLogin"];
+    await mount(codex);
+
+    await act(async () => renderer!.root
+      .findAllByProps({ className: "hyo-codex-login" })[0]!.props.onClick());
+
+    expect(globalThis.open).toHaveBeenCalledWith("https://bound", "_blank", "noopener");
+  });
+
   it("keeps login available when unauthenticated metadata calls fail", async () => {
     await mount(provider({
       listModels: vi.fn(async () => { throw new Error("login required"); }),
