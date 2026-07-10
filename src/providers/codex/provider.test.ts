@@ -73,7 +73,10 @@ function createProcessController() {
   };
 }
 
-function createHarness(clientOverrides: Partial<CodexProviderClient> = {}) {
+function createHarness(
+  clientOverrides: Partial<CodexProviderClient> = {},
+  onInitialize?: (handlers: CodexConnectionHandlers) => void,
+) {
   const processes = [createProcessController(), createProcessController()];
   const processFactory = vi.fn(async () => processes.shift()!.process);
   const handlers: CodexConnectionHandlers[] = [];
@@ -100,6 +103,7 @@ function createHarness(clientOverrides: Partial<CodexProviderClient> = {}) {
   };
   const clientFactory = vi.fn<CodexClientFactory>(async (_process, nextHandlers) => {
     handlers.push(nextHandlers);
+    onInitialize?.(nextHandlers);
     return { client, dispose };
   });
   const provider = new CodexProvider({
@@ -141,6 +145,28 @@ async function expectAcceptedTurnToFailOnce(
 }
 
 describe("CodexProvider runtime lifecycle", () => {
+  it("delivers an initialize-time config warning once to the first registered runtime", async () => {
+    const { provider } = createHarness({}, (handlers) => {
+      handlers.onNotification({
+        method: "configWarning",
+        params: { summary: "Startup config warning", details: null },
+      } as never);
+    });
+    await provider.listModels();
+
+    const firstEvents: ProviderEvent[] = [];
+    const first = provider.createRuntime(runtimeOptions((event) => firstEvents.push(event)));
+    first.start();
+    await vi.waitFor(() => expect(first.ready).toBe(true));
+    expect(firstEvents).toContainEqual({ type: "warning", message: "Startup config warning" });
+
+    const secondEvents: ProviderEvent[] = [];
+    const second = provider.createRuntime(runtimeOptions((event) => secondEvents.push(event)));
+    second.start();
+    await vi.waitFor(() => expect(second.ready).toBe(true));
+    expect(secondEvents.some((event) => event.type === "warning")).toBe(false);
+  });
+
   it("tombstones a completed turn before an immediate successor can receive late events", async () => {
     const { provider, client, handlers } = createHarness();
     const lifecycle = new SessionLifecycle<ReturnType<CodexProvider["createRuntime"]>>();

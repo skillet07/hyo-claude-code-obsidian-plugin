@@ -48,4 +48,29 @@ describe("PermissionRequest", () => {
       networkPolicyAmendment: amendments[1],
     });
   });
+
+  it("renders authorization-bearing values beyond 1000 characters before allowing", () => {
+    const onRespond = vi.fn();
+    const sensitivePath = `/shared/${"nested/".repeat(160)}sensitive-target.txt`;
+    const reason = `${"review context ".repeat(90)}reason-tail-must-be-visible`;
+    const permissions = {
+      network: { enabled: true },
+      fileSystem: { read: [sensitivePath], write: [sensitivePath], entries: [] },
+    };
+    act(() => { renderer = create(<PermissionRequest request={{
+      requestId: "permissions-long", toolName: "permissions", approvalKind: "permissions",
+      reason, input: { permissions }, availableDecisions: ["allow"], grantScopes: ["turn"],
+    }} onRespond={onRespond} />); });
+
+    const rendered = JSON.stringify(renderer!.toJSON());
+    expect(onRespond).not.toHaveBeenCalled();
+    expect(rendered).toContain("sensitive-target.txt");
+    expect(rendered).toContain("reason-tail-must-be-visible");
+    expect(rendered).not.toContain("…");
+
+    act(() => renderer!.root.findByType("button").props.onClick());
+    expect(onRespond).toHaveBeenCalledWith("permissions-long", {
+      decision: "permissions", permissions, scope: "turn",
+    });
+  });
 });

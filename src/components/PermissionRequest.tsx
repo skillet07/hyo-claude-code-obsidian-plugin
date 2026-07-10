@@ -16,21 +16,37 @@ export function PermissionRequest({ request, onRespond }: PermissionRequestProps
     <div className="hyo-permission">
       <div className="hyo-permission-tool">{toolName}</div>
       {summary && <div className="hyo-permission-summary">{summary}</div>}
-      {request.reason && <div className="hyo-permission-reason">{bounded(request.reason)}</div>}
+      {request.reason && <div className="hyo-permission-reason">Reason: {request.reason}</div>}
+      {request.proposedAmendments?.execpolicy && (
+        <div className="hyo-permission-amendment">
+          Proposed command policy: {safeStringify(request.proposedAmendments.execpolicy)}
+        </div>
+      )}
+      {(request.proposedAmendments?.networkPolicy ?? []).map((amendment, index) => (
+        <div key={`network-detail-${index}`} className="hyo-permission-amendment">
+          Proposed network rule {index + 1}: {safeStringify(amendment)}
+        </div>
+      ))}
+      {input !== undefined && (
+        <details className="hyo-permission-full-data">
+          <summary>Full request data</summary>
+          <pre>{safeStringify(input)}</pre>
+        </details>
+      )}
       <div className="hyo-permission-buttons">
         {decisions.flatMap((decision) => {
           if (decision === "apply_network_policy_amendment") {
             return (request.proposedAmendments?.networkPolicy ?? []).map((amendment, index) => (
               <button key={`${decision}-${index}`} onClick={() => onRespond(requestId, {
                 decision, networkPolicyAmendment: amendment,
-              })}>Apply network rule: {bounded(amendment.host)} ({amendment.action})</button>
+              })}>Apply network rule {index + 1}</button>
             ));
           }
           if (decision === "allow_execpolicy_amendment") {
             const amendment = request.proposedAmendments?.execpolicy;
             return amendment ? [<button key={decision} onClick={() => onRespond(requestId, {
               decision, execpolicyAmendment: amendment,
-            })}>Allow command policy: {safeStringify(amendment)}</button>] : [];
+            })}>Allow with proposed command policy</button>] : [];
           }
           const label = decision === "allow" ? "Allow once"
             : decision === "allow_session" ? (request.availableDecisions ? "Allow for session" : "Always allow")
@@ -62,7 +78,7 @@ function getPermissionSummary(request: PermissionRequestData): string {
     return `${command}${cwd ? `\nWorking directory: ${cwd}` : ""}${network}`;
   }
   if (approvalKind === "file_change") {
-    return input.grantRoot ? `Grant root: ${bounded(String(input.grantRoot))}` : "File change requested";
+    return input.grantRoot ? `Grant root: ${String(input.grantRoot)}` : "File change requested";
   }
   if (approvalKind === "permissions") {
     return `Requested permissions: ${safeStringify(input.permissions ?? {})}`;
@@ -70,13 +86,11 @@ function getPermissionSummary(request: PermissionRequestData): string {
 
   switch (toolName) {
     case "Edit":
-      return shortPath(input.file_path);
     case "Write":
-      return shortPath(input.file_path);
     case "Read":
-      return shortPath(input.file_path);
+      return input.file_path || "";
     case "Bash":
-      return truncate(input.command || input.description || "", 80);
+      return input.command || input.description || "";
     case "Glob":
       return input.pattern || "";
     case "Grep":
@@ -90,20 +104,5 @@ function getPermissionSummary(request: PermissionRequestData): string {
 }
 
 function safeStringify(value: unknown): string {
-  try { return bounded(JSON.stringify(value)); } catch { return "[unavailable]"; }
-}
-
-function bounded(value: string, max = 1000): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
-}
-
-function shortPath(p: string | undefined): string {
-  if (!p) return "";
-  // Show last 2 path segments to give enough context without full path
-  const parts = p.replace(/^\/Users\/[^/]+/, "~").split("/");
-  return parts.slice(-2).join("/");
-}
-
-function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max) + "…" : s;
+  try { return JSON.stringify(value); } catch { return "[unavailable]"; }
 }

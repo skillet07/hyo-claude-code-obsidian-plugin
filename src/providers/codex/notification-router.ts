@@ -25,6 +25,7 @@ export const CODEX_ROUTER_DEFAULTS = {
   maxBufferedTotal: 1024,
   bufferTtlMs: 30_000,
   retiredTurnTtlMs: 30_000,
+  maxBufferedGlobal: 32,
 } as const;
 
 export interface CodexNotificationRouterOptions {
@@ -37,6 +38,7 @@ export interface CodexNotificationRouterOptions {
   clearTimer?: (timer: unknown) => void;
   onUnknownNotification?: (method: string) => void;
   maxUnknownDiagnostics?: number;
+  maxBufferedGlobal?: number;
 }
 
 export class CodexNotificationRouter {
@@ -50,6 +52,7 @@ export class CodexNotificationRouter {
   private readonly onUnknownNotification?: (method: string) => void;
   private readonly maxUnknownDiagnostics: number;
   private readonly normalizer: CodexEventNormalizer;
+  private readonly bufferedGlobal: ProviderEvent[] = [];
   private bufferedTotal = 0;
   private expiryTimer: unknown;
   private sequence = 0;
@@ -82,6 +85,10 @@ export class CodexNotificationRouter {
   registerRuntime(registration: CodexRuntimeRegistration): void {
     this.unregisterRuntime(registration.runtimeId);
     this.runtimes.set(registration.runtimeId, registration);
+    if (this.bufferedGlobal.length > 0) {
+      const pending = this.bufferedGlobal.splice(0);
+      this.emit(registration, pending);
+    }
   }
 
   unregisterRuntime(runtimeId: string): void {
@@ -132,6 +139,10 @@ export class CodexNotificationRouter {
     return this.retiredTurns.size;
   }
 
+  getGlobalBufferedCount(): number {
+    return this.bufferedGlobal.length;
+  }
+
   route(notification: BoundaryNotification): void {
     this.pruneExpiredBuffers();
     const events = this.normalizer.normalize(notification);
@@ -139,6 +150,10 @@ export class CodexNotificationRouter {
     const identity = getIdentity(notification.params);
 
     if (!identity.threadId) {
+      if (this.runtimes.size === 0) {
+        this.bufferGlobal(events);
+        return;
+      }
       for (const runtime of this.runtimes.values()) this.emit(runtime, events);
       return;
     }
@@ -193,7 +208,18 @@ export class CodexNotificationRouter {
     this.turnOwners.clear();
     this.retiredTurns.clear();
     this.bufferedByItem.clear();
+    this.bufferedGlobal.length = 0;
     this.bufferedTotal = 0;
+  }
+
+  private bufferGlobal(events: ProviderEvent[]): void {
+    if (this.options.maxBufferedGlobal <= 0) return;
+    for (const event of events) {
+      while (this.bufferedGlobal.length >= this.options.maxBufferedGlobal) {
+        this.bufferedGlobal.shift();
+      }
+      this.bufferedGlobal.push(event);
+    }
   }
 
   private flush(runtime: CodexRuntimeRegistration, turnId: string): void {

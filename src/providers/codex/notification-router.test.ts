@@ -219,4 +219,36 @@ describe("CodexNotificationRouter", () => {
     router.route({ method: "future/three", params: {} } as any);
     expect(diagnostic.mock.calls).toEqual([["future/one"], ["future/two"]]);
   });
+
+  it("buffers capped startup warnings and delivers them once to the first runtime", () => {
+    const router = new CodexNotificationRouter(undefined, { maxBufferedGlobal: 2 });
+    router.route({ method: "configWarning", params: { summary: "Oldest" } } as any);
+    router.route({ method: "configWarning", params: { summary: "Kept second" } } as any);
+    router.route({ method: "configWarning", params: { summary: "Kept third" } } as any);
+    expect(router.getGlobalBufferedCount()).toBe(2);
+
+    const first = vi.fn();
+    router.registerRuntime({ runtimeId: "first", threadId: "thread-1", onEvent: first });
+    expect(first.mock.calls).toEqual([
+      [{ type: "warning", message: "Kept second" }],
+      [{ type: "warning", message: "Kept third" }],
+    ]);
+    expect(router.getGlobalBufferedCount()).toBe(0);
+
+    const later = vi.fn();
+    router.registerRuntime({ runtimeId: "later", threadId: "thread-2", onEvent: later });
+    expect(later).not.toHaveBeenCalled();
+
+    router.route({ method: "configWarning", params: { summary: "Live warning" } } as any);
+    expect(first).toHaveBeenLastCalledWith({ type: "warning", message: "Live warning" });
+    expect(later).toHaveBeenCalledWith({ type: "warning", message: "Live warning" });
+  });
+
+  it("clears startup warnings on dispose", () => {
+    const router = new CodexNotificationRouter();
+    router.route({ method: "configWarning", params: { summary: "Discard me" } } as any);
+    expect(router.getGlobalBufferedCount()).toBe(1);
+    router.dispose();
+    expect(router.getGlobalBufferedCount()).toBe(0);
+  });
 });

@@ -448,12 +448,35 @@
   margin-bottom: 4px;
 }
 
-.hyo-permission-summary {
+.hyo-permission-summary,
+.hyo-permission-reason,
+.hyo-permission-amendment {
   font-size: 11px;
   color: var(--text-muted);
   font-family: var(--font-monospace);
   margin-bottom: 8px;
+  white-space: pre-wrap;
   word-break: break-all;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.hyo-permission-full-data {
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.hyo-permission-full-data pre {
+  margin: 6px 0 0;
+  padding: 6px;
+  font-family: var(--font-monospace);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--background-primary);
+  border-radius: var(--radius-s);
 }
 
 .hyo-permission-buttons {

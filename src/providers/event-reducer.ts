@@ -1,4 +1,16 @@
-import type { OrderedBlock } from "../chat-types";
+import type { Message, OrderedBlock } from "../chat-types";
+
+export function createVisibleProviderWarning(message: string): Message {
+  const content = `> [!warning] Codex warning\n> ${message.replace(/\n/g, "\n> ")}`;
+  return {
+    role: "assistant",
+    content,
+    thinking: "",
+    toolCalls: [],
+    orderedBlocks: [{ type: "text", content, turnIndex: 0 }],
+    streaming: false,
+  };
+}
 
 export function applyProviderTextDelta(
   blocks: OrderedBlock[],

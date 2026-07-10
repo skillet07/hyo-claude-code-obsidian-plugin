@@ -24,6 +24,7 @@ import {
   applyPlanUpdate,
   applyProviderTextDelta,
   applyReasoningCompletion,
+  createVisibleProviderWarning,
 } from "../providers/event-reducer";
 import {
   SessionLifecycle,
@@ -481,6 +482,16 @@ export function useSessionManager(options: SessionManagerOptions) {
       }
 
       const ss = streamStatesRef.current[tabId];
+      if (!ss && event.type === "warning") {
+        const warning = createVisibleProviderWarning(event.message);
+        setState((prev) => ({
+          ...prev,
+          tabs: prev.tabs.map((tab) => tab.id === tabId
+            ? { ...tab, messages: [...tab.messages, warning] }
+            : tab),
+        }));
+        return;
+      }
       if (!ss) return;
 
       if (event.type === "session_metadata") {
@@ -919,8 +930,8 @@ export function useSessionManager(options: SessionManagerOptions) {
       }
 
       if (event.type === "warning") {
-        const content = `> [!warning] Codex warning\n> ${event.message.replace(/\n/g, "\n> ")}`;
-        ss.orderedBlocks.push({ type: "text", content, turnIndex: ss.turnIndex });
+        const warning = createVisibleProviderWarning(event.message);
+        ss.orderedBlocks.push({ ...warning.orderedBlocks![0], turnIndex: ss.turnIndex });
         updateTabLastAssistant(tabId, () => buildSnapshot(ss));
         return;
       }

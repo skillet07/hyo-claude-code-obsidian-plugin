@@ -6,6 +6,7 @@ import {
   applyPlanUpdate,
   applyProviderTextDelta,
   applyReasoningCompletion,
+  createVisibleProviderWarning,
 } from "./event-reducer";
 
 describe("provider event reducer", () => {
@@ -31,6 +32,18 @@ describe("provider event reducer", () => {
 });
 
 describe("normalized Codex rich events", () => {
+  it("creates a visible assistant warning before any turn stream exists", () => {
+    expect(createVisibleProviderWarning("Startup config warning")).toMatchObject({
+      role: "assistant",
+      streaming: false,
+      content: expect.stringContaining("Startup config warning"),
+      orderedBlocks: [expect.objectContaining({
+        type: "text",
+        content: expect.stringContaining("Startup config warning"),
+      })],
+    });
+  });
+
   it("streams one plan card and replaces it with the authoritative final plan", () => {
     const blocks: OrderedBlock[] = [];
     applyPlanDelta(blocks, 0, "plan-1", "Draft");
