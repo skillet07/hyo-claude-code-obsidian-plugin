@@ -13,6 +13,8 @@ function createBroker() {
   };
 }
 
+const uiRequestId = (requestId: string | number) => `${typeof requestId}:${requestId}`;
+
 const commandRequest = {
   method: "item/commandExecution/requestApproval" as const,
   id: 41,
@@ -34,6 +36,30 @@ const commandRequest = {
 };
 
 describe("CodexServerRequestBroker", () => {
+  it("keeps concurrent numeric and string JSON-RPC ids independent", async () => {
+    const { broker, events } = createBroker();
+    const numeric = broker.handle({ ...commandRequest, id: 1 });
+    const string = broker.handle({
+      method: "item/fileChange/requestApproval",
+      id: "1",
+      params: {
+        threadId: "thread-2", turnId: "turn-2", itemId: "file-2",
+        startedAtMs: 2, reason: null, grantRoot: null,
+      },
+    });
+
+    expect(events.map((event) => "requestId" in event ? event.requestId : null)).toEqual([
+      "number:1",
+      "string:1",
+    ]);
+    expect(broker.pendingCount).toBe(2);
+
+    expect(broker.respondApproval("string:1", { decision: "deny" })).toBe(true);
+    expect(broker.respondApproval("number:1", { decision: "allow" })).toBe(true);
+    await expect(string).resolves.toEqual({ decision: "decline" });
+    await expect(numeric).resolves.toEqual({ decision: "accept" });
+  });
+
   it("emits command approval context and waits for the future runtime response", async () => {
     const { broker, events } = createBroker();
     const pending = broker.handle(commandRequest);
@@ -44,7 +70,7 @@ describe("CodexServerRequestBroker", () => {
     expect(settled).toBe(false);
     expect(events).toEqual([{
       type: "approval_requested",
-      requestId: "41",
+      requestId: uiRequestId(41),
       toolName: "command",
       approvalKind: "command_execution",
       threadId: "thread-1",
@@ -69,7 +95,7 @@ describe("CodexServerRequestBroker", () => {
       },
     }]);
 
-    expect(broker.respondApproval("41", { decision: "allow" })).toBe(true);
+    expect(broker.respondApproval(uiRequestId(41), { decision: "allow" })).toBe(true);
     await expect(pending).resolves.toEqual({ decision: "accept" });
   });
 
@@ -88,7 +114,7 @@ describe("CodexServerRequestBroker", () => {
   ])("maps command approval response %# to the exact generated shape", async (response, expected) => {
     const { broker } = createBroker();
     const pending = broker.handle({ ...commandRequest, id: `command-${response.decision}` });
-    broker.respondApproval(`command-${response.decision}`, response);
+    broker.respondApproval(uiRequestId(`command-${response.decision}`), response);
     await expect(pending).resolves.toEqual(expected);
   });
 
@@ -108,13 +134,13 @@ describe("CodexServerRequestBroker", () => {
       },
     });
     expect(events[0]).toEqual({
-      type: "approval_requested", requestId: `file-${decision}`,
+      type: "approval_requested", requestId: uiRequestId(`file-${decision}`),
       toolName: "file change", approvalKind: "file_change",
       threadId: "thread-1", turnId: "turn-1", itemId: "file-1",
       reason: "Write outside vault", input: { grantRoot: "/shared" },
       availableDecisions: ["allow", "allow_session", "deny", "cancel"],
     });
-    broker.respondApproval(`file-${decision}`, { decision });
+    broker.respondApproval(uiRequestId(`file-${decision}`), { decision });
     await expect(pending).resolves.toEqual({ decision: wireDecision });
   });
 
@@ -129,11 +155,11 @@ describe("CodexServerRequestBroker", () => {
       },
     });
 
-    expect(broker.respondApproval("file-pending", {
+    expect(broker.respondApproval(uiRequestId("file-pending"), {
       decision: "allow_execpolicy_amendment", execpolicyAmendment: ["prefix_rule", "git"],
     })).toBe(false);
     expect(broker.pendingCount).toBe(1);
-    expect(broker.respondApproval("file-pending", { decision: "allow" })).toBe(true);
+    expect(broker.respondApproval(uiRequestId("file-pending"), { decision: "allow" })).toBe(true);
     await expect(pending).resolves.toEqual({ decision: "accept" });
   });
 
@@ -155,7 +181,7 @@ describe("CodexServerRequestBroker", () => {
         },
       });
       expect(events[0]).toEqual({
-        type: "approval_requested", requestId: `permissions-${scope}`,
+        type: "approval_requested", requestId: uiRequestId(`permissions-${scope}`),
         toolName: "permissions", approvalKind: "permissions",
         threadId: "thread-1", turnId: "turn-1", itemId: "permissions-1",
         reason: "Need shared files",
@@ -163,7 +189,7 @@ describe("CodexServerRequestBroker", () => {
         availableDecisions: ["allow"],
         grantScopes: ["turn", "session"],
       });
-      expect(broker.respondPermissions(`permissions-${scope}`, {
+      expect(broker.respondPermissions(uiRequestId(`permissions-${scope}`), {
         permissions: { network: { enabled: true } }, scope, strictAutoReview: true,
       })).toBe(true);
       await expect(pending).resolves.toEqual({
@@ -187,7 +213,7 @@ describe("CodexServerRequestBroker", () => {
       },
     });
     expect(events).toEqual([{
-      type: "question_requested", requestId: "question-1",
+      type: "question_requested", requestId: uiRequestId("question-1"),
       threadId: "thread-1", turnId: "turn-1", itemId: "question-item",
       autoResolutionMs: 5000,
       questions: [{
@@ -196,7 +222,7 @@ describe("CodexServerRequestBroker", () => {
         options: [{ label: "A", description: "First" }, { label: "B", description: "Second" }],
       }],
     }]);
-    expect(broker.respondQuestion("question-1", { choice: ["B"], note: "custom" })).toBe(true);
+    expect(broker.respondQuestion(uiRequestId("question-1"), { choice: ["B"], note: "custom" })).toBe(true);
     await expect(pending).resolves.toEqual({
       answers: { choice: { answers: ["B"] }, note: { answers: ["custom"] } },
     });
@@ -219,8 +245,8 @@ describe("CodexServerRequestBroker", () => {
 
     await expect(pending).resolves.toBeNull();
     expect(broker.pendingCount).toBe(0);
-    expect(events.at(-1)).toEqual({ type: "request_resolved", requestId: "auto-question", reason: "auto" });
-    expect(broker.respondQuestion("auto-question", { q: "late" })).toBe(false);
+    expect(events.at(-1)).toEqual({ type: "request_resolved", requestId: uiRequestId("auto-question"), reason: "auto" });
+    expect(broker.respondQuestion(uiRequestId("auto-question"), { q: "late" })).toBe(false);
     vi.useRealTimers();
   });
 
@@ -241,8 +267,8 @@ describe("CodexServerRequestBroker", () => {
     })).toBe(true);
 
     await expect(pending).resolves.toBeNull();
-    expect(events.at(-1)).toEqual({ type: "request_resolved", requestId: "resolved-file", reason: "server" });
-    expect(broker.respondApproval("resolved-file", { decision: "allow" })).toBe(false);
+    expect(events.at(-1)).toEqual({ type: "request_resolved", requestId: uiRequestId("resolved-file"), reason: "server" });
+    expect(broker.respondApproval(uiRequestId("resolved-file"), { decision: "allow" })).toBe(false);
   });
 
   it("rejects unknown server requests with a method-not-found error", async () => {
