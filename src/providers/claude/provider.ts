@@ -31,6 +31,10 @@ const CLAUDE_CAPABILITIES: ProviderCapabilities = {
   compaction: true,
   recovery: true,
   tokenUsage: true,
+  models: false,
+  skills: false,
+  rateLimits: false,
+  auth: false,
 };
 
 function readPlanFile(cwd: string): string | null {
@@ -143,19 +147,19 @@ export function createClaudeProvider(options: { cliPath: string }): ChatProvider
     createRuntime(runtimeOptions) {
       return new ClaudeRuntime(options.cliPath, runtimeOptions, runtimes);
     },
-    listSessions(cwd) {
+    async listSessions(cwd) {
       return listPastSessions(cwd).map((session) => ({
         providerId: "claude" as const,
         ...session,
       }));
     },
-    loadSession(cwd, sessionId) {
+    async loadSession(cwd, sessionId) {
       return loadSessionHistory(cwd, sessionId);
     },
-    renameSession(cwd, sessionId, title) {
+    async renameSession(cwd, sessionId, title) {
       saveCustomTitle(cwd, sessionId, title);
     },
-    recoverSession(cwd, sessionId) {
+    async recoverSession(cwd, sessionId) {
       const jsonlPath = path.join(getProjectDir(cwd), `${sessionId}.jsonl`);
       return repairSession(jsonlPath);
     },

@@ -4,8 +4,10 @@ import { create, type ReactTestRenderer } from "react-test-renderer";
 import type {
   ChatProvider,
   ProviderEvent,
+  ProviderHistoryMessage,
   ProviderRuntime,
   ProviderRuntimeOptions,
+  ProviderSessionSummary,
 } from "../providers/types";
 
 const providerMocks = vi.hoisted(() => ({
@@ -76,8 +78,14 @@ class FakeProvider implements ChatProvider {
     compaction: true,
     recovery: true,
     tokenUsage: true,
+    models: false,
+    skills: false,
+    rateLimits: false,
+    auth: false,
   };
   readonly runtimes: FakeRuntime[] = [];
+  sessions: ProviderSessionSummary[] = [];
+  history: ProviderHistoryMessage[] = [];
   cleanupCalls = 0;
 
   createRuntime(options: ProviderRuntimeOptions): ProviderRuntime {
@@ -86,17 +94,17 @@ class FakeProvider implements ChatProvider {
     return runtime;
   }
 
-  listSessions() {
-    return [];
+  async listSessions() {
+    return this.sessions;
   }
 
-  loadSession() {
-    return [];
+  async loadSession() {
+    return this.history;
   }
 
-  renameSession(): void {}
+  async renameSession(): Promise<void> {}
 
-  recoverSession() {
+  async recoverSession() {
     return { success: false, linesRemoved: 0, capturedUserText: null };
   }
 
@@ -120,8 +128,8 @@ function Harness({ cliPath }: { cliPath: string }) {
   return null;
 }
 
-function mount(cliPath: string): void {
-  act(() => {
+async function mount(cliPath: string): Promise<void> {
+  await act(async () => {
     renderer = create(React.createElement(Harness, { cliPath }));
   });
 }
@@ -145,10 +153,39 @@ afterEach(() => {
 });
 
 describe("useSessionManager lifecycle integration", () => {
-  it("rejects an overlapping send and reports acceptance explicitly", () => {
+  it("awaits asynchronous session listing and history loading", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [{
+      providerId: "claude",
+      id: "session-1",
+      title: "Past session",
+      date: new Date("2026-07-10T00:00:00Z"),
+    }];
+    provider.history = [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi" },
+    ];
+    providerMocks.providers.set("provider-a", provider);
+    await mount("provider-a");
+
+    await act(async () => {
+      await manager.refreshPastSessions();
+    });
+    expect(manager.pastSessions).toEqual(provider.sessions);
+
+    await act(async () => {
+      await manager.openPastSession(provider.sessions[0]!);
+    });
+    expect(manager.activeMessages.map((message) => message.content)).toEqual([
+      "hello",
+      "hi",
+    ]);
+  });
+
+  it("rejects an overlapping send and reports acceptance explicitly", async () => {
     const provider = new FakeProvider();
     providerMocks.providers.set("provider-a", provider);
-    mount("provider-a");
+    await mount("provider-a");
 
     let firstAccepted: boolean | undefined;
     let secondAccepted: boolean | undefined;
@@ -165,10 +202,10 @@ describe("useSessionManager lifecycle integration", () => {
       .toHaveLength(1);
   });
 
-  it("stops by retiring the runtime, accepts the next send, and ignores old callbacks", () => {
+  it("stops by retiring the runtime, accepts the next send, and ignores old callbacks", async () => {
     const provider = new FakeProvider();
     providerMocks.providers.set("provider-a", provider);
-    mount("provider-a");
+    await mount("provider-a");
 
     act(() => {
       manager.sendMessage("first");
@@ -197,19 +234,19 @@ describe("useSessionManager lifecycle integration", () => {
     expect(manager.activeMessages.at(-1)?.content).toBe("");
   });
 
-  it("cleans the old provider and runtime when the provider instance changes", () => {
+  it("cleans the old provider and runtime when the provider instance changes", async () => {
     const providerA = new FakeProvider();
     const providerB = new FakeProvider();
     providerMocks.providers.set("provider-a", providerA);
     providerMocks.providers.set("provider-b", providerB);
-    mount("provider-a");
+    await mount("provider-a");
 
     act(() => {
       manager.sendMessage("first");
     });
     const oldRuntime = providerA.runtimes[0];
 
-    act(() => {
+    await act(async () => {
       renderer?.update(React.createElement(Harness, { cliPath: "provider-b" }));
     });
 

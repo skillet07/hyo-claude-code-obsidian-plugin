@@ -9,6 +9,7 @@ import { createClaudeProvider } from "../providers/claude/provider";
 import type {
   ProviderContentBlock,
   ProviderEvent,
+  ProviderHistoryMessage,
   ProviderId,
   ProviderRecoveryResult,
   ProviderRuntime,
@@ -679,9 +680,12 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       // If this tab has a persisted session, save the custom title and refresh dropdown
       if (tab?.providerSessionId) {
-        provider.renameSession(options.cwd, tab.providerSessionId, title);
-        // Refresh past sessions to update dropdown
-        setTimeout(() => refreshPastSessions(), 0);
+        void provider
+          .renameSession(options.cwd, tab.providerSessionId, title)
+          .then(() => refreshPastSessions())
+          .catch((error) => {
+            console.error("[hyo] Failed to rename session:", error);
+          });
       }
 
       return {
@@ -766,6 +770,7 @@ export function useSessionManager(options: SessionManagerOptions) {
           permissionMode: currentTab?.permissionMode || options.permissionMode,
           agent: currentTab?.agent || "",
           providerSessionId: providerSessionId || undefined,
+          providerState: currentTab?.providerState,
           resume: !!providerSessionId,
           maxOutputTokens: options.maxOutputTokens,
           onEvent: (event) => dispatchEvent(event),
@@ -922,9 +927,9 @@ export function useSessionManager(options: SessionManagerOptions) {
 
   // ------- past sessions -------
 
-  const refreshPastSessions = useCallback(() => {
+  const refreshPastSessions = useCallback(async () => {
     try {
-      const sessions = provider.listSessions(options.cwd);
+      const sessions = await provider.listSessions(options.cwd);
       setPastSessions(sessions);
     } catch (e) {
       console.error("[hyo] Failed to list past sessions:", e);
@@ -932,10 +937,10 @@ export function useSessionManager(options: SessionManagerOptions) {
   }, [options.cwd, provider]);
 
   useEffect(() => {
-    refreshPastSessions();
+    void refreshPastSessions();
   }, [refreshPastSessions]);
 
-  const openPastSession = useCallback((pastSession: PastSession) => {
+  const openPastSession = useCallback(async (pastSession: PastSession) => {
     const existing = stateRef.current.tabs.find(
       (tab) =>
         tab.providerId === pastSession.providerId &&
@@ -946,8 +951,13 @@ export function useSessionManager(options: SessionManagerOptions) {
       return;
     }
 
-    // Load conversation history from JSONL
-    const history = provider.loadSession(options.cwd, pastSession.id);
+    let history: ProviderHistoryMessage[];
+    try {
+      history = await provider.loadSession(options.cwd, pastSession.id);
+    } catch (error) {
+      console.error("[hyo] Failed to load session:", error);
+      return;
+    }
     const messages: Message[] = history.map((m) => ({
       role: m.role,
       content: m.content,
@@ -994,7 +1004,7 @@ export function useSessionManager(options: SessionManagerOptions) {
   // with `--resume` against the cleaned file. Returns the user's last
   // attempted message text so the UI can prefill the input.
   const recoverSession = useCallback(
-    (tabId: string): ProviderRecoveryResult => {
+    async (tabId: string): Promise<ProviderRecoveryResult> => {
       const tab = stateRef.current.tabs.find((t) => t.id === tabId);
       if (!tab?.providerSessionId) {
         return {
@@ -1005,7 +1015,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         };
       }
 
-      const result = provider.recoverSession(
+      const result = await provider.recoverSession(
         options.cwd,
         tab.providerSessionId,
       );

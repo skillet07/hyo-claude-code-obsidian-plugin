@@ -1,4 +1,13 @@
 export { ProviderRegistry } from "./registry";
+export {
+  CodexProvider,
+  CodexRuntime,
+  createCodexProvider,
+  type CodexClientFactory,
+  type CodexConnectionHandlers,
+  type CodexProviderClient,
+  type CodexProviderOptions,
+} from "./codex/provider";
 export type {
   ChatProvider,
   ProviderApprovalBehavior,
@@ -7,9 +16,18 @@ export type {
   ProviderEvent,
   ProviderHistoryMessage,
   ProviderId,
+  ProviderAuthState,
+  ProviderLoginMethod,
+  ProviderLoginStartResult,
+  ProviderModelEffort,
+  ProviderModelInfo,
   ProviderQuestion,
+  ProviderRateLimitInfo,
+  ProviderRateLimits,
+  ProviderRateLimitWindow,
   ProviderRecoveryResult,
   ProviderRuntime,
   ProviderRuntimeOptions,
   ProviderSessionSummary,
+  ProviderSkillInfo,
 } from "./types";

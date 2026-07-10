@@ -515,23 +515,31 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
           onPermissionResponse={sendPermissionResponse}
           onQuestionAnswer={sendQuestionAnswer}
           onRecover={() => {
-            const result = recoverSession(activeTabId);
-            if (result.success) {
-              if (result.capturedUserText) {
-                setInputValues((prev) => ({
-                  ...prev,
-                  [activeTabId]: result.capturedUserText!,
-                }));
-                setTimeout(() => inputRef.current?.focus(), 50);
+            void (async () => {
+              try {
+                const result = await recoverSession(activeTabId);
+                if (result.success) {
+                  if (result.capturedUserText) {
+                    setInputValues((prev) => ({
+                      ...prev,
+                      [activeTabId]: result.capturedUserText!,
+                    }));
+                    setTimeout(() => inputRef.current?.focus(), 50);
+                  }
+                  new Notice(
+                    `Session recovered (${result.linesRemoved} corrupt entries removed). Review your message and send.`
+                  );
+                } else {
+                  new Notice(
+                    `Couldn't recover session: ${result.reason || "unknown error"}`
+                  );
+                }
+              } catch (error) {
+                new Notice(
+                  `Couldn't recover session: ${error instanceof Error ? error.message : String(error)}`
+                );
               }
-              new Notice(
-                `Session recovered (${result.linesRemoved} corrupt entries removed). Review your message and send.`
-              );
-            } else {
-              new Notice(
-                `Couldn't recover session: ${result.reason || "unknown error"}`
-              );
-            }
+            })();
           }}
         />
       ) : (

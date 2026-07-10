@@ -18,7 +18,69 @@ export interface ProviderCapabilities {
   compaction: boolean;
   recovery: boolean;
   tokenUsage: boolean;
+  models: boolean;
+  skills: boolean;
+  rateLimits: boolean;
+  auth: boolean;
 }
+
+export interface ProviderModelEffort {
+  id: string;
+  description: string;
+}
+
+export interface ProviderModelInfo {
+  id: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+  defaultEffort: string;
+  effortOptions: ProviderModelEffort[];
+  inputModalities: string[];
+  supportsPersonality: boolean;
+}
+
+export interface ProviderSkillInfo {
+  name: string;
+  description: string;
+  path: string;
+  scope: string;
+  enabled: boolean;
+  cwd: string;
+}
+
+export interface ProviderRateLimitWindow {
+  usedPercent: number;
+  resetsAt: Date | null;
+  windowMinutes: number | null;
+}
+
+export interface ProviderRateLimitInfo {
+  id: string | null;
+  name: string | null;
+  primary: ProviderRateLimitWindow | null;
+  secondary: ProviderRateLimitWindow | null;
+}
+
+export interface ProviderRateLimits {
+  default: ProviderRateLimitInfo;
+  byId: Record<string, ProviderRateLimitInfo>;
+}
+
+export interface ProviderAuthState {
+  authenticated: boolean;
+  requiresAuth: boolean;
+  accountType: string | null;
+  email?: string | null;
+  plan?: string | null;
+}
+
+export type ProviderLoginMethod = "browser" | "device";
+
+export type ProviderLoginStartResult =
+  | { type: "browser"; loginId: string; url: string }
+  | { type: "device"; loginId: string; url: string; userCode: string }
+  | { type: "complete" };
 
 export interface ProviderSessionSummary {
   providerId: ProviderId;
@@ -217,6 +279,7 @@ export interface ProviderRuntimeOptions {
   permissionMode: string;
   agent?: string;
   providerSessionId?: string;
+  providerState?: unknown;
   resume?: boolean;
   maxOutputTokens?: number;
   onEvent: (event: ProviderEvent) => void;
@@ -255,13 +318,19 @@ export interface ChatProvider {
   readonly id: ProviderId;
   readonly capabilities: ProviderCapabilities;
   createRuntime(options: ProviderRuntimeOptions): ProviderRuntime;
-  listSessions(cwd: string): ProviderSessionSummary[];
-  loadSession(cwd: string, sessionId: string): ProviderHistoryMessage[];
-  renameSession(cwd: string, sessionId: string, title: string): void;
+  listSessions(cwd: string): Promise<ProviderSessionSummary[]>;
+  loadSession(cwd: string, sessionId: string): Promise<ProviderHistoryMessage[]>;
+  renameSession(cwd: string, sessionId: string, title: string): Promise<void>;
   recoverSession(
     cwd: string,
     sessionId: string,
-  ): ProviderRecoveryResult;
+  ): Promise<ProviderRecoveryResult>;
+  listModels?(): Promise<ProviderModelInfo[]>;
+  listSkills?(cwd: string): Promise<ProviderSkillInfo[]>;
+  getRateLimits?(): Promise<ProviderRateLimits>;
+  getAuthState?(refreshToken?: boolean): Promise<ProviderAuthState>;
+  startLogin?(method: ProviderLoginMethod): Promise<ProviderLoginStartResult>;
+  cancelLogin?(loginId: string): Promise<void>;
   generateTitle?(input: {
     userMessage: string;
     assistantMessage: string;
