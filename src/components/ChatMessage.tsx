@@ -211,6 +211,7 @@ function AssistantMessage({ app, message, onRecover, onPermissionResponse, onQue
 
         {message.askQuestion && onQuestionAnswer && (
           <AskQuestion
+            key={message.askQuestion.id}
             question={message.askQuestion}
             onAnswer={onQuestionAnswer}
           />

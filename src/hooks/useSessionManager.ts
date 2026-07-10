@@ -7,6 +7,7 @@ import type {
 import { ProviderRegistry } from "../providers/registry";
 import { createClaudeProvider } from "../providers/claude/provider";
 import type {
+  ChatProvider,
   ProviderContentBlock,
   ProviderEvent,
   ProviderHistoryMessage,
@@ -220,6 +221,10 @@ export function useSessionManager(options: SessionManagerOptions) {
   const lifecycleRef = useRef(new SessionLifecycle<ProviderRuntime>());
   const activeProviderRef = useRef(provider);
   const streamStatesRef = useRef<Record<string, StreamState>>({});
+  const visibleProviderErrorsRef = useRef<Record<string, string>>({});
+  const openingSessionsRef = useRef(
+    new WeakMap<ChatProvider, Set<string>>(),
+  );
   const scrollRef = useRef({ nearBottom: true });
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -283,6 +288,29 @@ export function useSessionManager(options: SessionManagerOptions) {
     []
   );
 
+  const surfaceProviderError = useCallback((tabId: string, error: string) => {
+    const text = `Provider error: ${error}`;
+    updateTabLastAssistant(tabId, (message) => {
+      const alreadyVisible =
+        message.content.includes(error) ||
+        (message.orderedBlocks ?? []).some(
+          (block) => block.type === "text" && block.content?.includes(error),
+        );
+      if (alreadyVisible) return { streaming: false };
+      if ((message.orderedBlocks ?? []).length > 0) {
+        return {
+          content: [message.content, text].filter(Boolean).join("\n\n"),
+          orderedBlocks: [
+            ...(message.orderedBlocks ?? []),
+            { type: "text", content: text, turnIndex: Number.MAX_SAFE_INTEGER },
+          ],
+          streaming: false,
+        };
+      }
+      return { content: text, streaming: false };
+    });
+  }, [updateTabLastAssistant]);
+
   const makeProcessEvent = useCallback(
     (tabId: string, lease: RuntimeLease) => (event: ProviderEvent) => {
       const lifecycle = lifecycleRef.current;
@@ -290,6 +318,17 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       if (event.type === "error") {
         console.error("[hyo] Provider error:", event.message);
+        visibleProviderErrorsRef.current[tabId] = event.message;
+        surfaceProviderError(tabId, event.message);
+        if (!event.willRetry) {
+          lifecycle.finishTurn(tabId);
+          setState((prev) => ({
+            ...prev,
+            tabs: prev.tabs.map((tab) =>
+              tab.id === tabId ? { ...tab, generating: false } : tab,
+            ),
+          }));
+        }
         return;
       }
 
@@ -420,14 +459,12 @@ export function useSessionManager(options: SessionManagerOptions) {
       }
 
       if (event.type === "question_requested") {
-        updateTabLastAssistant(tabId, (message) => ({
-          askQuestion: message.askQuestion
-            ? { ...message.askQuestion, id: event.requestId }
-            : {
-                id: event.requestId,
-                questions: event.questions,
-                answers: {},
-              },
+        updateTabLastAssistant(tabId, () => ({
+          askQuestion: {
+            id: event.requestId,
+            questions: event.questions,
+            answers: {},
+          },
         }));
         return;
       }
@@ -443,7 +480,36 @@ export function useSessionManager(options: SessionManagerOptions) {
         return;
       }
 
+      if (event.type === "request_resolved") {
+        updateTabLastAssistant(tabId, (message) => ({
+          ...(message.permissionRequest?.requestId === event.requestId
+            ? {
+              permissionRequest: {
+                ...message.permissionRequest,
+                resolved: "denied" as const,
+              },
+            }
+            : {}),
+          ...(message.askQuestion?.id === event.requestId
+            ? { askQuestion: null }
+            : {}),
+          ...(message.planReview?.requestId === event.requestId
+            ? {
+              planReview: {
+                ...message.planReview,
+                resolved: "rejected" as const,
+              },
+            }
+            : {}),
+        }));
+        return;
+      }
+
       if (event.type === "turn_completed") {
+        if (event.error && !visibleProviderErrorsRef.current[tabId]) {
+          surfaceProviderError(tabId, event.error);
+        }
+        delete visibleProviderErrorsRef.current[tabId];
         lifecycle.finishTurn(tabId);
         updateTabLastAssistant(tabId, () => ({ streaming: false }));
         setState((prev) => ({
@@ -596,7 +662,12 @@ export function useSessionManager(options: SessionManagerOptions) {
       }
 
     },
-    [options.autoGenerateTitles, provider, updateTabLastAssistant],
+    [
+      options.autoGenerateTitles,
+      provider,
+      surfaceProviderError,
+      updateTabLastAssistant,
+    ],
   );
 
   // ------- tab management -------
@@ -704,6 +775,7 @@ export function useSessionManager(options: SessionManagerOptions) {
       const tabId = stateRef.current.activeTabId;
       const lifecycle = lifecycleRef.current;
       if (!lifecycle.beginTurn(tabId)) return false;
+      delete visibleProviderErrorsRef.current[tabId];
 
       // For display, use the typed text; for arrays (image messages) use displayText or placeholder
       const displayContent = typeof content === "string"
@@ -803,6 +875,13 @@ export function useSessionManager(options: SessionManagerOptions) {
       // transport can build the correct updatedPermissions for "always allow".
       const tab = stateRef.current.tabs.find((t) => t.id === tabId);
       const lastMsg = tab?.messages[tab.messages.length - 1];
+      const permissionMatches =
+        lastMsg?.permissionRequest?.requestId === requestId &&
+        !lastMsg.permissionRequest.resolved;
+      const planMatches =
+        lastMsg?.planReview?.requestId === requestId &&
+        !lastMsg.planReview.resolved;
+      if (!permissionMatches && !planMatches) return;
       const toolName = lastMsg?.permissionRequest?.toolName;
       lifecycleRef.current.getRuntime(tabId)?.respondApproval(
         requestId,
@@ -811,7 +890,7 @@ export function useSessionManager(options: SessionManagerOptions) {
       );
       updateTabLastAssistant(tabId, (msg) => {
         const updates: Partial<Message> = {};
-        if (msg.permissionRequest) {
+        if (msg.permissionRequest?.requestId === requestId) {
           updates.permissionRequest = {
             ...msg.permissionRequest,
             resolved: behavior === "deny" ? ("denied" as const) : ("allowed" as const),
@@ -842,6 +921,7 @@ export function useSessionManager(options: SessionManagerOptions) {
       const lastAssistant = [...(tab?.messages || [])]
         .reverse()
         .find((m) => m.role === "assistant");
+      if (lastAssistant?.askQuestion?.id !== questionId) return;
       const questions = lastAssistant?.askQuestion?.questions || [];
 
       // Send control_response with questions + answers as updatedInput.
@@ -951,11 +1031,29 @@ export function useSessionManager(options: SessionManagerOptions) {
       return;
     }
 
+    const providerOpenings = openingSessionsRef.current.get(provider) ?? new Set<string>();
+    openingSessionsRef.current.set(provider, providerOpenings);
+    const openingKey = `${pastSession.providerId}\u0000${pastSession.id}`;
+    if (providerOpenings.has(openingKey)) return;
+    providerOpenings.add(openingKey);
+
     let history: ProviderHistoryMessage[];
     try {
       history = await provider.loadSession(options.cwd, pastSession.id);
     } catch (error) {
       console.error("[hyo] Failed to load session:", error);
+      return;
+    } finally {
+      providerOpenings.delete(openingKey);
+    }
+    if (activeProviderRef.current !== provider) return;
+    const openedWhileLoading = stateRef.current.tabs.find(
+      (tab) =>
+        tab.providerId === pastSession.providerId &&
+        tab.providerSessionId === pastSession.id,
+    );
+    if (openedWhileLoading) {
+      setState((prev) => ({ ...prev, activeTabId: openedWhileLoading.id }));
       return;
     }
     const messages: Message[] = history.map((m) => ({

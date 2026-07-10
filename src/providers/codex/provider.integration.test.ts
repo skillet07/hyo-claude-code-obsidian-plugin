@@ -4,9 +4,10 @@ import type { ProviderEvent } from "../types";
 import type { CodexAppServerProcess } from "./app-server-process";
 import { CodexProvider } from "./provider";
 
-function fakeJsonlAppServer() {
+function fakeJsonlAppServer(options: { terminalApproval?: boolean } = {}) {
   const stdout = new PassThrough();
-  const requests: Array<{ id?: number; method: string; params?: unknown }> = [];
+  const requests: Array<{ id?: number | string; method?: string; params?: unknown }> = [];
+  const responses: Array<{ id: number | string; result?: unknown }> = [];
   let resolveExit!: (value: any) => void;
   const exit = new Promise<any>((resolve) => {
     resolveExit = resolve;
@@ -18,7 +19,7 @@ function fakeJsonlAppServer() {
     return report;
   });
 
-  const respond = (id: number, result: unknown) => {
+  const respond = (id: number | string, result: unknown) => {
     stdout.write(`${JSON.stringify({ id, result })}\n`);
   };
   const notify = (method: string, params: unknown) => {
@@ -29,11 +30,16 @@ function fakeJsonlAppServer() {
     stdin: {
       write(value: string) {
         const message = JSON.parse(value.trim()) as {
-          id?: number;
-          method: string;
+          id?: number | string;
+          method?: string;
           params?: unknown;
+          result?: unknown;
         };
         requests.push(message);
+        if (!message.method && message.id !== undefined) {
+          responses.push({ id: message.id, result: message.result });
+          return true;
+        }
         switch (message.method) {
           case "initialize":
             respond(message.id!, {});
@@ -42,6 +48,30 @@ function fakeJsonlAppServer() {
             respond(message.id!, { thread: { id: "thread-jsonl" } });
             break;
           case "turn/start":
+            if (options.terminalApproval) {
+              stdout.write(`${JSON.stringify({
+                id: "approval-jsonl",
+                method: "item/commandExecution/requestApproval",
+                params: {
+                  threadId: "thread-jsonl",
+                  turnId: "turn-jsonl",
+                  itemId: "command-jsonl",
+                  command: "pwd",
+                  cwd: "/vault",
+                  reason: null,
+                  environmentId: "env",
+                  approvalId: null,
+                  commandActions: null,
+                  networkApprovalContext: null,
+                  proposedExecpolicyAmendment: null,
+                  proposedNetworkPolicyAmendments: null,
+                },
+              })}\n`);
+              notify("turn/completed", {
+                threadId: "thread-jsonl",
+                turn: { id: "turn-jsonl", status: "completed", items: [] },
+              });
+            }
             notify("item/agentMessage/delta", {
               threadId: "thread-jsonl",
               turnId: "turn-jsonl",
@@ -66,7 +96,7 @@ function fakeJsonlAppServer() {
     stop,
   } as unknown as CodexAppServerProcess;
 
-  return { process, requests, stop };
+  return { process, requests, responses, stop };
 }
 
 describe("CodexProvider JSONL integration", () => {
@@ -115,5 +145,35 @@ describe("CodexProvider JSONL integration", () => {
 
     provider.cleanup();
     await vi.waitFor(() => expect(server.stop).toHaveBeenCalledTimes(1));
+  });
+
+  it("cancels an early approval when a terminal event precedes the turn/start response", async () => {
+    const server = fakeJsonlAppServer({ terminalApproval: true });
+    const provider = new CodexProvider({
+      appVersion: "0.3.0",
+      processFactory: async () => server.process,
+    });
+    const events: ProviderEvent[] = [];
+    const runtime = provider.createRuntime({
+      cwd: "/vault",
+      model: "gpt-5.4",
+      permissionMode: "manual",
+      onEvent: (event) => events.push(event),
+    });
+
+    runtime.start();
+    runtime.send("terminal ordering");
+
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      type: "turn_completed",
+      status: "completed",
+    })));
+    await vi.waitFor(() => expect(server.responses).toContainEqual({
+      id: "approval-jsonl",
+      result: { decision: "cancel" },
+    }));
+    expect(events.some((event) => event.type === "approval_requested")).toBe(false);
+
+    provider.cleanup();
   });
 });

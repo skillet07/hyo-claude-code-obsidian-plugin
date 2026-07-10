@@ -14,6 +14,14 @@ const providerMocks = vi.hoisted(() => ({
   providers: new Map<string, ChatProvider>(),
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 vi.mock("../providers/claude/provider", () => ({
   createClaudeProvider: ({ cliPath }: { cliPath: string }) => {
     const provider = providerMocks.providers.get(cliPath);
@@ -23,6 +31,7 @@ vi.mock("../providers/claude/provider", () => ({
 }));
 
 import { useSessionManager } from "./useSessionManager";
+import { mapThreadHistory } from "../providers/codex/history-mapper";
 
 class FakeRuntime implements ProviderRuntime {
   readonly providerId = "claude" as const;
@@ -31,6 +40,8 @@ class FakeRuntime implements ProviderRuntime {
   cleanupCalls = 0;
   interruptCalls = 0;
   sent: (string | any[])[] = [];
+  approvals: Array<{ requestId: string; behavior: string }> = [];
+  questionResponses: Array<{ requestId: string; answers: Record<string, string> }> = [];
 
   constructor(private readonly onEvent: (event: ProviderEvent) => void) {}
 
@@ -50,8 +61,17 @@ class FakeRuntime implements ProviderRuntime {
     this.interruptCalls++;
   }
 
-  respondApproval(): void {}
-  respondQuestion(): void {}
+  respondApproval(requestId: string, behavior: "allow" | "allow_always" | "deny"): void {
+    this.approvals.push({ requestId, behavior });
+  }
+
+  respondQuestion(
+    requestId: string,
+    _questions: any[],
+    answers: Record<string, string>,
+  ): void {
+    this.questionResponses.push({ requestId, answers });
+  }
 
   compact(): void {
     this.send("/compact");
@@ -138,7 +158,10 @@ beforeEach(() => {
   providerMocks.providers.clear();
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   vi.spyOn(console, "error").mockImplementation((message) => {
-    if (!String(message).includes("react-test-renderer is deprecated")) {
+    if (
+      !String(message).includes("react-test-renderer is deprecated") &&
+      !String(message).includes("[hyo] Provider error")
+    ) {
       throw new Error(String(message));
     }
   });
@@ -153,6 +176,110 @@ afterEach(() => {
 });
 
 describe("useSessionManager lifecycle integration", () => {
+  it("renders one actionable error and finalizes a failed provider turn", async () => {
+    const provider = new FakeProvider();
+    providerMocks.providers.set("provider-a", provider);
+    await mount("provider-a");
+    act(() => manager.sendMessage("hello"));
+    const runtime = provider.runtimes[0]!;
+
+    act(() => {
+      runtime.emit({
+        type: "error",
+        message: "Codex connection failed. Send again to reconnect.",
+        willRetry: false,
+      });
+      runtime.emit({
+        type: "turn_completed",
+        status: "failed",
+        error: "Codex connection failed. Send again to reconnect.",
+      });
+    });
+
+    const assistants = manager.activeMessages.filter((message) => message.role === "assistant");
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0]!.content).toContain("Codex connection failed");
+    expect(assistants[0]!.content.match(/Codex connection failed/g)).toHaveLength(1);
+    expect(assistants[0]!.streaming).toBe(false);
+    expect(manager.activeGenerating).toBe(false);
+  });
+
+  it("renders a terminal-only start failure instead of a blank assistant", async () => {
+    const provider = new FakeProvider();
+    providerMocks.providers.set("provider-a", provider);
+    await mount("provider-a");
+    act(() => manager.sendMessage("hello"));
+
+    act(() => provider.runtimes[0]!.emit({
+      type: "turn_completed",
+      status: "failed",
+      error: "thread/start failed",
+    }));
+
+    expect(manager.activeMessages.at(-1)?.content).toContain("thread/start failed");
+    expect(manager.activeMessages.at(-1)?.streaming).toBe(false);
+    expect(manager.activeGenerating).toBe(false);
+  });
+
+  it("resolves matching controls, replaces question payloads, and ignores late answers", async () => {
+    const provider = new FakeProvider();
+    providerMocks.providers.set("provider-a", provider);
+    await mount("provider-a");
+    act(() => manager.sendMessage("hello"));
+    const runtime = provider.runtimes[0]!;
+
+    act(() => runtime.emit({
+      type: "approval_requested",
+      requestId: "approval-1",
+      toolName: "command",
+    }));
+    act(() => runtime.emit({
+      type: "request_resolved",
+      requestId: "approval-1",
+      reason: "server",
+    }));
+    expect(manager.activeMessages.at(-1)?.permissionRequest?.resolved).toBe("denied");
+    act(() => manager.sendPermissionResponse("approval-1", "allow"));
+    expect(runtime.approvals).toEqual([]);
+
+    act(() => runtime.emit({
+      type: "question_requested",
+      requestId: "question-1",
+      questions: [{ id: "old", question: "Old question" }],
+    }));
+    act(() => runtime.emit({
+      type: "question_requested",
+      requestId: "question-2",
+      questions: [{ id: "new", question: "New question", isSecret: true }],
+    }));
+    expect(manager.activeMessages.at(-1)?.askQuestion).toEqual({
+      id: "question-2",
+      questions: [{ id: "new", question: "New question", isSecret: true }],
+      answers: {},
+    });
+    act(() => runtime.emit({
+      type: "request_resolved",
+      requestId: "question-2",
+      reason: "server",
+    }));
+    expect(manager.activeMessages.at(-1)?.askQuestion).toBeNull();
+    act(() => manager.sendQuestionAnswer("question-2", { new: "late" }));
+    expect(runtime.questionResponses).toEqual([]);
+
+    act(() => runtime.emit({
+      type: "plan_review_requested",
+      requestId: "plan-1",
+      planContent: "Plan",
+      allowedPrompts: [],
+    }));
+    act(() => runtime.emit({
+      type: "request_resolved",
+      requestId: "plan-1",
+      reason: "server",
+    }));
+    expect(manager.activeMessages.at(-1)?.planReview?.resolved).toBe("rejected");
+  });
+
   it("awaits asynchronous session listing and history loading", async () => {
     const provider = new FakeProvider();
     provider.sessions = [{
@@ -180,6 +307,93 @@ describe("useSessionManager lifecycle integration", () => {
       "hello",
       "hi",
     ]);
+  });
+
+  it("deduplicates concurrent opens of the same async history session", async () => {
+    const provider = new FakeProvider();
+    const pending = deferred<ProviderHistoryMessage[]>();
+    const loadSession = vi.spyOn(provider, "loadSession")
+      .mockImplementation(() => pending.promise);
+    providerMocks.providers.set("provider-a", provider);
+    await mount("provider-a");
+    const session: ProviderSessionSummary = {
+      providerId: "claude",
+      id: "session-race",
+      title: "Race",
+      date: new Date(),
+    };
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = manager.openPastSession(session);
+      second = manager.openPastSession(session);
+    });
+    expect(loadSession).toHaveBeenCalledTimes(1);
+    pending.resolve([{ role: "assistant", content: "loaded" }]);
+    await act(async () => Promise.all([first, second]));
+
+    expect(manager.tabs.filter((tab) => tab.providerSessionId === "session-race"))
+      .toHaveLength(1);
+  });
+
+  it("ignores history resolved by a provider generation that was replaced", async () => {
+    const providerA = new FakeProvider();
+    const providerB = new FakeProvider();
+    const pending = deferred<ProviderHistoryMessage[]>();
+    vi.spyOn(providerA, "loadSession").mockImplementation(() => pending.promise);
+    providerMocks.providers.set("provider-a", providerA);
+    providerMocks.providers.set("provider-b", providerB);
+    await mount("provider-a");
+    const session: ProviderSessionSummary = {
+      providerId: "claude",
+      id: "stale-session",
+      title: "Stale",
+      date: new Date(),
+    };
+
+    let opening!: Promise<void>;
+    act(() => {
+      opening = manager.openPastSession(session);
+    });
+    await act(async () => {
+      renderer?.update(React.createElement(Harness, { cliPath: "provider-b" }));
+    });
+    pending.resolve([{ role: "assistant", content: "stale history" }]);
+    await act(async () => opening);
+
+    expect(manager.tabs.some((tab) => tab.providerSessionId === "stale-session"))
+      .toBe(false);
+  });
+
+  it("shows failed Codex turn status when reopening mapped history", async () => {
+    const provider = new FakeProvider();
+    provider.history = mapThreadHistory({
+      turns: [{
+        id: "failed-turn",
+        status: "failed",
+        error: { message: "model unavailable" },
+        itemsView: "full",
+        startedAt: null,
+        completedAt: null,
+        durationMs: null,
+        items: [],
+      }],
+    } as never);
+    providerMocks.providers.set("provider-a", provider);
+    await mount("provider-a");
+    const session: ProviderSessionSummary = {
+      providerId: "codex",
+      id: "failed-session",
+      title: "Failed session",
+      date: new Date(),
+    };
+
+    await act(async () => manager.openPastSession(session));
+
+    expect(manager.activeMessages.at(-1)?.content)
+      .toContain("Turn failed: model unavailable");
+    expect(manager.activeMessages.at(-1)?.streaming).toBe(false);
   });
 
   it("rejects an overlapping send and reports acceptance explicitly", async () => {

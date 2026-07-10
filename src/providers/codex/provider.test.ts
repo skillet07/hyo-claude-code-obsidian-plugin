@@ -4,6 +4,7 @@ import type { ProviderEvent } from "../types";
 import type { CodexAppServerProcess } from "./app-server-process";
 import {
   CodexProvider,
+  CodexRuntime,
   type CodexClientFactory,
   type CodexConnectionHandlers,
   type CodexProviderClient,
@@ -345,6 +346,53 @@ describe("CodexProvider runtime lifecycle", () => {
     expect(events.some((event) => event.type === "approval_requested")).toBe(false);
   });
 
+  it("atomically owns an early request before a buffered terminal event flushes", async () => {
+    let handlers!: CodexConnectionHandlers;
+    let earlyApproval!: Promise<unknown>;
+    const turnStart = vi.fn(async ({ threadId }) => {
+      earlyApproval = handlers.onServerRequest({
+        id: "terminal-early-approval",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId, turnId: "turn-terminal", itemId: "item-terminal",
+          command: "pwd", cwd: "/vault", reason: null,
+          environmentId: "env", approvalId: null, commandActions: null,
+          networkApprovalContext: null, proposedExecpolicyAmendment: null,
+          proposedNetworkPolicyAmendments: null,
+        },
+      });
+      handlers.onNotification({
+        method: "turn/completed",
+        params: {
+          threadId,
+          turn: { id: "turn-terminal", status: "completed", items: [] },
+        },
+      });
+      return {
+        turn: { id: "turn-terminal", items: [], status: "inProgress" },
+      } as never;
+    });
+    const harness = createHarness({ turnStart });
+    const events: ProviderEvent[] = [];
+    const runtime = harness.provider.createRuntime(runtimeOptions((event) => events.push(event)));
+    runtime.start();
+    await vi.waitFor(() => expect(harness.handlers).toHaveLength(1));
+    handlers = harness.handlers[0]!;
+    await vi.waitFor(() => expect(runtime.ready).toBe(true));
+
+    runtime.send("hello");
+
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      type: "turn_completed",
+      status: "completed",
+    })));
+    await expect(Promise.race([
+      earlyApproval,
+      new Promise((resolve) => setTimeout(() => resolve("timed out"), 25)),
+    ])).resolves.toEqual({ decision: "cancel" });
+    expect(events.some((event) => event.type === "approval_requested")).toBe(false);
+  });
+
   it("auto-cancels an old-turn request after a replacement resumes the same thread", async () => {
     const { provider, client, handlers } = createHarness();
     const firstEvents: ProviderEvent[] = [];
@@ -548,6 +596,52 @@ describe("CodexProvider runtime lifecycle", () => {
     });
   });
 
+  it("settles deny for every approval request kind", async () => {
+    const { provider, handlers } = createHarness();
+    const runtime = provider.createRuntime(runtimeOptions(() => undefined));
+    runtime.start();
+    runtime.send("one");
+    await vi.waitFor(() => expect(runtime.ready).toBe(true));
+
+    const command = handlers[0]!.onServerRequest({
+      id: "deny-command",
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "command-1",
+        command: "pwd", cwd: "/vault", reason: null,
+        environmentId: "env", approvalId: null, commandActions: null,
+        networkApprovalContext: null, proposedExecpolicyAmendment: null,
+        proposedNetworkPolicyAmendments: null,
+      },
+    });
+    const file = handlers[0]!.onServerRequest({
+      id: "deny-file",
+      method: "item/fileChange/requestApproval",
+      params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "file-1",
+        startedAtMs: 1, reason: null, grantRoot: null,
+      },
+    });
+    const permissions = handlers[0]!.onServerRequest({
+      id: "deny-permissions",
+      method: "item/permissions/requestApproval",
+      params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "permissions-1",
+        environmentId: "env", startedAtMs: 1, cwd: "/vault",
+        reason: "Need access",
+        permissions: { network: { enabled: true }, fileSystem: null },
+      },
+    });
+
+    runtime.respondApproval("string:deny-command", "deny");
+    runtime.respondApproval("string:deny-file", "deny");
+    runtime.respondApproval("string:deny-permissions", "deny");
+
+    await expect(command).resolves.toEqual({ decision: "decline" });
+    await expect(file).resolves.toEqual({ decision: "decline" });
+    await expect(permissions).resolves.toEqual({ permissions: {}, scope: "turn" });
+  });
+
   it("propagates unknown server requests as method-not-found", async () => {
     const { provider, handlers } = createHarness();
     const runtime = provider.createRuntime(runtimeOptions(() => undefined));
@@ -699,6 +793,48 @@ describe("CodexProvider runtime lifecycle", () => {
 
     await vi.waitFor(() => expect(process.stop).toHaveBeenCalled());
     expect(process.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not assign or register a thread/start result after runtime cleanup", async () => {
+    const started = deferred<any>();
+    const threadStart = vi.fn(() => started.promise);
+    const { provider, clientFactory } = createHarness({ threadStart });
+    const runtime = provider.createRuntime(
+      runtimeOptions(() => undefined),
+    ) as CodexRuntime;
+    runtime.start();
+    await vi.waitFor(() => expect(threadStart).toHaveBeenCalledTimes(1));
+    runtime.cleanup();
+
+    started.resolve({ thread: thread("thread-after-cleanup") });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const connection = provider.getActiveConnection()!;
+    expect(runtime.threadId).toBeUndefined();
+    expect((connection.router as any).runtimes.size).toBe(0);
+    expect((provider as any).runtimes.size).toBe(0);
+    expect(clientFactory).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not register a resumed thread before its RPC succeeds", async () => {
+    const resumed = deferred<any>();
+    const threadResume = vi.fn(() => resumed.promise);
+    const { provider } = createHarness({ threadResume });
+    const runtime = provider.createRuntime(runtimeOptions(() => undefined, {
+      providerSessionId: "thread-existing",
+      resume: true,
+    })) as CodexRuntime;
+    runtime.start();
+    await vi.waitFor(() => expect(threadResume).toHaveBeenCalledTimes(1));
+
+    const connection = provider.getActiveConnection()!;
+    expect((connection.router as any).runtimes.size).toBe(0);
+    runtime.cleanup();
+    resumed.resolve({ thread: thread("thread-existing") });
+    await Promise.resolve();
+    expect((connection.router as any).runtimes.size).toBe(0);
+    expect((provider as any).runtimes.size).toBe(0);
   });
 });
 

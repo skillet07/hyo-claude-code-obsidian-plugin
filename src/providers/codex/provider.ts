@@ -151,6 +151,7 @@ interface BufferedBrokerRequest {
 class CodexBrokerRequestRouter {
   private readonly turnOwners = new Map<string, string>();
   private readonly bufferedByTurn = new Map<string, BufferedBrokerRequest[]>();
+  private readonly stagedByTurn = new Map<string, BrokerRequestEvent[]>();
   private readonly retiredTurns = new Map<string, unknown>();
   private bufferedTotal = 0;
   private sequence = 0;
@@ -203,7 +204,7 @@ class CodexBrokerRequestRouter {
     });
   }
 
-  bind(runtime: CodexRuntime, turnId: string): boolean {
+  claim(runtime: CodexRuntime, turnId: string): boolean {
     const threadId = runtime.threadId;
     if (!threadId) return false;
     const key = turnKey(threadId, turnId);
@@ -211,17 +212,37 @@ class CodexBrokerRequestRouter {
     this.turnOwners.set(key, runtime.runtimeId);
     const buffered = this.bufferedByTurn.get(key) ?? [];
     this.bufferedByTurn.delete(key);
+    const staged: BrokerRequestEvent[] = [];
     for (const entry of buffered.sort((left, right) => left.sequence - right.sequence)) {
       this.bufferedTotal--;
       if (entry.candidateRuntimeIds.has(runtime.runtimeId)) {
-        this.deliver(runtime, entry.event);
+        this.requestOwners.set(
+          entry.event.requestId,
+          pendingRequestOwner(runtime, entry.event),
+        );
+        staged.push(entry.event);
       } else {
         this.broker.cancelRequest(entry.event.requestId);
       }
     }
+    if (staged.length > 0) this.stagedByTurn.set(key, staged);
     this.removeCandidate(runtime.runtimeId);
     this.scheduleExpiry();
     return true;
+  }
+
+  flush(runtime: CodexRuntime, turnId: string): void {
+    const threadId = runtime.threadId;
+    if (!threadId) return;
+    const key = turnKey(threadId, turnId);
+    if (this.turnOwners.get(key) !== runtime.runtimeId) return;
+    const staged = this.stagedByTurn.get(key) ?? [];
+    this.stagedByTurn.delete(key);
+    for (const event of staged) {
+      if (this.requestOwners.get(event.requestId)?.runtimeId === runtime.runtimeId) {
+        runtime.deliver(event);
+      }
+    }
   }
 
   failPending(runtime: CodexRuntime): void {
@@ -237,6 +258,11 @@ class CodexBrokerRequestRouter {
       });
       if (keep.length === 0) this.bufferedByTurn.delete(key);
       else this.bufferedByTurn.set(key, keep);
+    }
+    for (const [key, events] of this.stagedByTurn) {
+      const keep = events.filter((event) => event.requestId !== requestId);
+      if (keep.length === 0) this.stagedByTurn.delete(key);
+      else this.stagedByTurn.set(key, keep);
     }
     this.scheduleExpiry();
   }
@@ -270,11 +296,14 @@ class CodexBrokerRequestRouter {
     }
     const bufferedRequestIds = [...this.bufferedByTurn.values()]
       .flatMap((entries) => entries.map((entry) => entry.event.requestId));
+    const stagedRequestIds = [...this.stagedByTurn.values()]
+      .flatMap((events) => events.map((event) => event.requestId));
     this.bufferedByTurn.clear();
+    this.stagedByTurn.clear();
     this.turnOwners.clear();
     this.retiredTurns.clear();
     this.bufferedTotal = 0;
-    for (const requestId of bufferedRequestIds) {
+    for (const requestId of [...bufferedRequestIds, ...stagedRequestIds]) {
       this.broker.cancelRequest(requestId);
     }
   }
@@ -605,9 +634,15 @@ export class CodexProvider implements ChatProvider {
     turnId: string,
   ): boolean {
     if (!this.isActive(connection)) return false;
+    const requestClaimed = connection.requestRouter.claim(runtime, turnId);
+    if (!requestClaimed) return false;
     const notificationBound = connection.router.bindTurn(runtime.runtimeId, turnId);
-    const requestBound = connection.requestRouter.bind(runtime, turnId);
-    return notificationBound && requestBound;
+    if (!notificationBound) {
+      connection.requestRouter.retireRuntimeTurn(runtime, turnId);
+      return false;
+    }
+    connection.requestRouter.flush(runtime, turnId);
+    return true;
   }
 
   failPendingRuntimeTurn(
@@ -632,7 +667,14 @@ export class CodexProvider implements ChatProvider {
       return false;
     }
     if (owner.approvalKind === "permissions") {
-      if (behavior === "deny") return false;
+      if (behavior === "deny") {
+        const denied = connection.broker.respondPermissions(requestId, {
+          permissions: {},
+          scope: "turn",
+        });
+        if (denied) connection.requestOwners.delete(requestId);
+        return denied;
+      }
       const permissions = Object.fromEntries(
         Object.entries(owner.permissions ?? {}).filter(([, value]) => value != null),
       );
@@ -1011,8 +1053,8 @@ export class CodexRuntime implements ProviderRuntime {
   }
 
   private async attachToConnection(connection: ActiveConnection): Promise<void> {
+    let startedThreadId: string | undefined;
     if (this.threadId) {
-      this.register(connection);
       await connection.client.threadResume({
         threadId: this.threadId,
         ...threadConfiguration(this.options),
@@ -1021,12 +1063,13 @@ export class CodexRuntime implements ProviderRuntime {
       const response = await connection.client.threadStart(
         threadConfiguration(this.options),
       );
-      this.threadId = response.thread.id;
-      this.register(connection);
+      startedThreadId = response.thread.id;
     }
     if (!this.provider.isActive(connection) || this.cleaned) {
       throw new Error("Codex app-server connection was lost while preparing the thread");
     }
+    if (startedThreadId) this.threadId = startedThreadId;
+    this.register(connection);
     this.attachedGeneration = connection.generation;
     this.ready = true;
     this.emitSessionMetadata();

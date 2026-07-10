@@ -89,6 +89,7 @@ export function StreamingMessage({
 
         {message.askQuestion && (
           <AskQuestion
+            key={message.askQuestion.id}
             question={message.askQuestion}
             onAnswer={onQuestionAnswer}
           />

@@ -85,6 +85,23 @@ export function mapThreadHistory(thread: Thread): ProviderHistoryMessage[] {
       }
     }
 
+    const turnStatus = turn.status === "failed" || turn.status === "interrupted"
+      ? turn.status
+      : undefined;
+    const turnError = turn.error?.message;
+    if (turnStatus) {
+      const marker = turnStatus === "failed"
+        ? `[Turn failed${turnError ? `: ${turnError}` : ""}]`
+        : "[Turn interrupted]";
+      assistantParts.push(marker);
+      orderedBlocks.push({
+        type: "text",
+        content: marker,
+        turnIndex: 0,
+        providerItemId: `${turn.id}-status`,
+      });
+    }
+
     if (userParts.length > 0) {
       messages.push({ role: "user", content: userParts.filter(Boolean).join("\n") });
     }
@@ -96,6 +113,8 @@ export function mapThreadHistory(thread: Thread): ProviderHistoryMessage[] {
       messages.push({
         role: "assistant",
         content: assistantParts.join("\n\n"),
+        ...(turnStatus ? { turnStatus } : {}),
+        ...(turnError ? { error: turnError } : {}),
         thinking: thinkingParts.join("\n\n"),
         toolCalls,
         orderedBlocks,

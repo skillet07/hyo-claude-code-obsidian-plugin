@@ -62,4 +62,45 @@ describe("Codex history mapping", () => {
     expect(history[1]?.orderedBlocks?.filter((block) => block.type === "text"))
       .toEqual([{ type: "text", content: "final answer", turnIndex: 0, providerItemId: "agent-1" }]);
   });
+
+  it("preserves failed and interrupted turn status as visible history markers", () => {
+    const history = mapThreadHistory({
+      turns: [
+        {
+          id: "failed-turn",
+          status: "failed",
+          error: { message: "model unavailable" },
+          itemsView: "full",
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+          items: [],
+        },
+        {
+          id: "interrupted-turn",
+          status: "interrupted",
+          error: null,
+          itemsView: "full",
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+          items: [],
+        },
+      ],
+    } as never);
+
+    expect(history).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        turnStatus: "failed",
+        error: "model unavailable",
+        content: expect.stringContaining("Turn failed: model unavailable"),
+      }),
+      expect.objectContaining({
+        role: "assistant",
+        turnStatus: "interrupted",
+        content: expect.stringContaining("Turn interrupted"),
+      }),
+    ]);
+  });
 });

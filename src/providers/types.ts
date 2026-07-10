@@ -94,6 +94,8 @@ export interface ProviderSessionSummary {
 export interface ProviderHistoryMessage {
   role: "user" | "assistant";
   content: string;
+  turnStatus?: "completed" | "interrupted" | "failed";
+  error?: string;
   displayText?: string;
   attachments?: { type: string; name: string }[];
   thinking?: string;
