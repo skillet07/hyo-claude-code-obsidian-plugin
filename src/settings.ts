@@ -383,7 +383,7 @@ export class HyoSettingTab extends PluginSettingTab {
     const workingDirSetting = new Setting(containerEl)
       .setName("Working directory")
       .setDesc(
-        "Claude's home folder — where it looks for your CLAUDE.md and starts working from. Defaults to your current Obsidian vault. Set this to a different folder if your Claude project lives outside your vault."
+        "Shared project folder where Claude Code and Codex start and load their provider-specific instructions (for example, CLAUDE.md or AGENTS.md). Defaults to your current Obsidian vault. Set this when either provider's project lives outside the vault."
       )
       .addText((text) =>
         text

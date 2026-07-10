@@ -96,7 +96,7 @@ Implemented Codex surfaces include:
 - structured user questions with safe cancellation when a request or runtime retires;
 - thread listing, provider-scoped history loading and renaming, and stable turn resume;
 - explicit compact, live model catalog and reasoning effort, enabled skills, account rate limits, and ChatGPT account state;
-- Codex subagent spawn/send/wait/close activity, with current `collabAgentToolCall` events and the stable forward-compatible `collabToolCall` alias.
+- Codex subagent spawn/send/wait/close activity from the current stable `collabToolCall` shape, including singular receiver/new-thread IDs and agent status, while retaining compatibility with the Codex CLI 0.144.1 `collabAgentToolCall` shape.
 
 ## Security defaults
 
@@ -167,7 +167,7 @@ HYO_CODEX_SMOKE_FIXTURE=note.md \
 npm run smoke:codex
 ```
 
-The script uses only stable app-server JSONL/JSON-RPC, a read-only sandbox, `on-request` approvals, network off, a strict timeout, and one bounded read-only subagent request. It fails instead of granting approvals or answering questions, requires actual spawn plus terminal/wait/close collaboration evidence, interrupts an active turn on failure, and terminates app-server. It never invokes `codex exec`.
+The script uses only stable app-server JSONL/JSON-RPC, a read-only sandbox, `on-request` approvals, network off, a strict timeout, and one bounded read-only subagent request. It fails instead of granting approvals or answering questions, requires spawn evidence plus either a completed wait/close operation or an actual terminal agent status, interrupts an active turn on failure, and terminates app-server. It never invokes `codex exec`.
 
 ### Manual release matrix
 

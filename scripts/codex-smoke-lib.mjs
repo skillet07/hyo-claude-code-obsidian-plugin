@@ -84,41 +84,65 @@ export function observeCollabSmokeMessage(state, message) {
     if (item.type !== "collabAgentToolCall" && item.type !== "collabToolCall") {
       continue;
     }
-    const tool = item.tool;
-    const status = item.status;
-    if (tool === "spawnAgent" || tool === "spawn_agent") state.sawSpawn = true;
+    const tool = normalizeWireName(item.tool);
+    const status = normalizeWireName(item.status);
+    if (tool === "spawn_agent") state.sawSpawn = true;
     if (status === "failed") state.failed = true;
     if (
-      status === "completed" ||
-      tool === "wait" ||
-      tool === "closeAgent" ||
-      tool === "close_agent" ||
-      Object.values(item.agentsStates ?? {}).some((agent) =>
-        ["completed", "interrupted", "errored", "shutdown", "notFound"].includes(
-          agent?.status,
-        ),
-      )
-    ) {
-      state.sawTerminal = true;
+      status === "completed" &&
+      (tool === "wait" || tool === "close_agent")
+    ) state.sawCompletedWaitOrClose = true;
+    const agentStatuses = [
+      ...Object.values(item.agentsStates ?? {}).map((agent) => agent?.status),
+      stableAgentStatus(item.agentStatus),
+    ];
+    if (agentStatuses.some((agentStatus) =>
+      TERMINAL_AGENT_STATUSES.has(normalizeWireName(agentStatus)))) {
+      state.sawTerminalAgent = true;
     }
   }
   return state;
 }
 
 export function assertCollabSmokeEvidence(state) {
+  if (state.failed) {
+    throw new Error("Codex collaboration tool call reported failure.");
+  }
   if (!state.sawSpawn) {
     throw new Error(
       "Codex smoke did not receive a collabAgentToolCall/collabToolCall spawn event.",
     );
   }
-  if (!state.sawTerminal) {
+  if (!state.sawCompletedWaitOrClose && !state.sawTerminalAgent) {
     throw new Error(
-      "Codex smoke received a spawn but no terminal, wait, or close collaboration status.",
+      "Codex smoke received a spawn but no completed wait/close operation or terminal agent status.",
     );
   }
-  if (state.failed) {
-    throw new Error("Codex collaboration tool call reported failure.");
-  }
+}
+
+const TERMINAL_AGENT_STATUSES = new Set([
+  "completed",
+  "interrupted",
+  "errored",
+  "failed",
+  "shutdown",
+  "not_found",
+]);
+
+function stableAgentStatus(value) {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return typeof value.status === "string"
+    ? value.status
+    : typeof value.type === "string"
+      ? value.type
+      : undefined;
+}
+
+function normalizeWireName(value) {
+  return typeof value === "string"
+    ? value.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)
+    : "";
 }
 
 function extractItems(message) {

@@ -195,23 +195,65 @@ describe("CodexEventNormalizer", () => {
     }]);
   });
 
-  it.each(["collabAgentToolCall", "collabToolCall"])(
-    "normalizes %s lifecycle without exposing the Codex discriminator",
-    (type) => {
-      expect(normalizer.normalize(lifecycle("completed", {
-        type, id: "collab-1", tool: "spawnAgent", status: "completed",
-        senderThreadId: "thread-parent", receiverThreadIds: ["thread-child"],
-        prompt: "Investigate", model: "gpt-5", reasoningEffort: "high",
-        agentsStates: { "thread-child": { status: "completed", message: "Done" } },
-      }) as never)).toEqual([{
-        type: "subagent_activity", phase: "completed", operation: "spawn_agent",
-        id: "collab-1", status: "completed", senderThreadId: "thread-parent",
-        receiverThreadIds: ["thread-child"], newThreadIds: ["thread-child"],
-        prompt: "Investigate",
-        agents: { "thread-child": { status: "completed", message: "Done" } },
-      }]);
+  it("keeps the generated 0.144.1 collabAgentToolCall shape working", () => {
+    expect(normalizer.normalize(lifecycle("completed", {
+      type: "collabAgentToolCall", id: "collab-legacy", tool: "spawnAgent",
+      status: "completed", senderThreadId: "thread-parent",
+      receiverThreadIds: ["thread-child"], prompt: "Investigate",
+      model: "gpt-5", reasoningEffort: "high",
+      agentsStates: { "thread-child": { status: "completed", message: "Done" } },
+    }) as never)).toEqual([{
+      type: "subagent_activity", phase: "completed", operation: "spawn_agent",
+      id: "collab-legacy", status: "completed", senderThreadId: "thread-parent",
+      receiverThreadIds: ["thread-child"], newThreadIds: ["thread-child"],
+      prompt: "Investigate",
+      agents: { "thread-child": { status: "completed", message: "Done" } },
+    }]);
+  });
+
+  it.each([
+    {
+      tool: "spawn_agent", receiverThreadId: null, newThreadId: "thread-child",
+      prompt: "Investigate", agentStatus: { status: "running", message: null },
+      operation: "spawn_agent", receivers: ["thread-child"], children: ["thread-child"],
+      agents: { "thread-child": { status: "running", message: null } },
     },
-  );
+    {
+      tool: "send_input", receiverThreadId: "thread-child", newThreadId: null,
+      prompt: "Continue", agentStatus: { type: "running", message: "working" },
+      operation: "send_input", receivers: ["thread-child"], children: [],
+      agents: { "thread-child": { status: "running", message: "working" } },
+    },
+    {
+      tool: "wait", receiverThreadId: "thread-child", newThreadId: undefined,
+      prompt: undefined, agentStatus: "completed",
+      operation: "wait", receivers: ["thread-child"], children: [],
+      agents: { "thread-child": { status: "completed", message: null } },
+    },
+    {
+      tool: "close_agent", receiverThreadId: "thread-child", newThreadId: undefined,
+      prompt: null, agentStatus: { type: "shutdown", message: "closed" },
+      operation: "close_agent", receivers: ["thread-child"], children: [],
+      agents: { "thread-child": { status: "shutdown", message: "closed" } },
+    },
+  ] as const)("normalizes current stable $tool lifecycle fields", (fixture) => {
+    expect(normalizer.normalize(lifecycle("completed", {
+      type: "collabToolCall", id: `stable-${fixture.tool}`, tool: fixture.tool,
+      status: "completed", senderThreadId: "thread-parent",
+      receiverThreadId: fixture.receiverThreadId,
+      newThreadId: fixture.newThreadId,
+      prompt: fixture.prompt,
+      agentStatus: fixture.agentStatus,
+    }) as never)).toEqual([{
+      type: "subagent_activity", phase: "completed", operation: fixture.operation,
+      id: `stable-${fixture.tool}`, status: "completed",
+      senderThreadId: "thread-parent",
+      receiverThreadIds: fixture.receivers,
+      newThreadIds: fixture.children,
+      prompt: fixture.prompt ?? null,
+      agents: fixture.agents,
+    }]);
+  });
 
   it.each([
     ["sendInput", "send_input"],
@@ -239,9 +281,9 @@ describe("CodexEventNormalizer", () => {
     });
   });
 
-  it("falls back safely when the forward collab alias is malformed", () => {
+  it("falls back safely when the current stable collab base is malformed", () => {
     expect(normalizer.normalize(lifecycle("started", {
-      type: "collabToolCall", id: "bad-collab", tool: "spawnAgent",
+      type: "collabToolCall", id: "bad-collab", tool: "spawn_agent",
     }) as never)).toEqual([{
       type: "tool_activity",
       phase: "started",
@@ -251,14 +293,25 @@ describe("CodexEventNormalizer", () => {
       },
     }]);
     expect(normalizer.normalize(lifecycle("completed", {
-      type: "collabToolCall", id: "changed-collab", tool: "wait", status: "completed",
-      senderThreadId: "sender", receiverThreadIds: ["receiver"], prompt: null,
-      model: null, reasoningEffort: null,
-      agentsStates: { receiver: { status: "futureStatus", message: null } },
+      type: "collabToolCall", id: "bad-receiver", tool: "wait", status: "completed",
+      senderThreadId: "sender", receiverThreadId: 42,
     }) as never)[0]).toMatchObject({
       type: "tool_activity",
-      tool: { id: "changed-collab", kind: "unknown", name: "collabToolCall" },
+      tool: { id: "bad-receiver", kind: "unknown", name: "collabToolCall" },
     });
+  });
+
+  it("preserves a current stable collab event when agentStatus is unknown", () => {
+    expect(normalizer.normalize(lifecycle("completed", {
+      type: "collabToolCall", id: "future-agent-status", tool: "wait",
+      status: "completed", senderThreadId: "sender",
+      receiverThreadId: "receiver",
+      agentStatus: { type: "future_status", message: "new server value" },
+    }) as never)).toEqual([{
+      type: "subagent_activity", phase: "completed", operation: "wait",
+      id: "future-agent-status", status: "completed", senderThreadId: "sender",
+      receiverThreadIds: ["receiver"], newThreadIds: [], prompt: null, agents: {},
+    }]);
   });
 
   it("explicitly handles every current generated ThreadItem discriminator", () => {

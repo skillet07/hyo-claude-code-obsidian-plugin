@@ -6,6 +6,10 @@ import type {
 import type { Thread } from "./generated/v2/Thread";
 import type { ThreadItem } from "./generated/v2/ThreadItem";
 import type { UserInput } from "./generated/v2/UserInput";
+import {
+  normalizeCollabToolCallItem,
+  type NormalizedCollabToolCallItem,
+} from "./collab-item";
 
 const TITLE_LENGTH = 40;
 
@@ -30,6 +34,18 @@ export function mapThreadHistory(thread: Thread): ProviderHistoryMessage[] {
     const orderedBlocks: OrderedBlock[] = [];
 
     for (const item of turn.items) {
+      const collab = normalizeCollabToolCallItem(item);
+      if (collab) {
+        const tool = mapCollabToolCall(collab);
+        toolCalls.push(tool);
+        orderedBlocks.push({
+          type: "tool",
+          toolId: tool.id,
+          turnIndex: 0,
+          providerItemId: tool.id,
+        });
+        continue;
+      }
       switch (item.type) {
         case "userMessage":
           userParts.push(...item.content.map(formatUserInput));
@@ -195,8 +211,6 @@ function mapToolCall(item: Exclude<ThreadItem,
       return { id: item.id, name: "sleep", input: { durationMs: item.durationMs }, result: null };
     case "imageGeneration":
       return { id: item.id, name: "image generation", input: { revisedPrompt: item.revisedPrompt }, result: stringifyResult(item.result) };
-    case "collabAgentToolCall":
-      return { id: item.id, name: String(item.tool), input: { prompt: item.prompt, receiverThreadIds: item.receiverThreadIds }, result: item.status };
     default:
       return {
         id: typeof raw.id === "string" ? raw.id : "unknown",
@@ -205,6 +219,20 @@ function mapToolCall(item: Exclude<ThreadItem,
         result: null,
       };
   }
+}
+
+function mapCollabToolCall(item: NormalizedCollabToolCallItem): ToolCallData {
+  return {
+    id: item.id,
+    name: item.operation,
+    input: {
+      prompt: item.prompt,
+      receiverThreadIds: item.receiverThreadIds,
+      newThreadIds: item.newThreadIds,
+      agents: item.agents,
+    },
+    result: item.status,
+  };
 }
 
 function stringifyResult(value: unknown): string | null {

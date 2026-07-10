@@ -103,4 +103,49 @@ describe("Codex history mapping", () => {
       }),
     ]);
   });
+
+  it("replays current stable and legacy collaboration items through one mapping", () => {
+    const history = mapThreadHistory({
+      turns: [{
+        id: "collab-turn", status: "completed", error: null, itemsView: "full",
+        startedAt: null, completedAt: null, durationMs: null,
+        items: [
+          {
+            type: "collabToolCall", id: "stable-spawn", tool: "spawn_agent",
+            status: "completed", senderThreadId: "parent",
+            newThreadId: "child", prompt: "Read note.md",
+            agentStatus: { status: "running", message: null },
+          },
+          {
+            type: "collabAgentToolCall", id: "legacy-close", tool: "closeAgent",
+            status: "completed", senderThreadId: "parent",
+            receiverThreadIds: ["child"], prompt: null, model: null,
+            reasoningEffort: null,
+            agentsStates: { child: { status: "shutdown", message: "closed" } },
+          },
+        ],
+      }],
+    } as never);
+
+    expect(history).toHaveLength(1);
+    expect(history[0]?.toolCalls).toEqual([
+      {
+        id: "stable-spawn", name: "spawn_agent",
+        input: {
+          prompt: "Read note.md", receiverThreadIds: ["child"],
+          newThreadIds: ["child"],
+          agents: { child: { status: "running", message: null } },
+        },
+        result: "completed",
+      },
+      {
+        id: "legacy-close", name: "close_agent",
+        input: {
+          prompt: null, receiverThreadIds: ["child"], newThreadIds: [],
+          agents: { child: { status: "shutdown", message: "closed" } },
+        },
+        result: "completed",
+      },
+    ]);
+  });
 });

@@ -1,11 +1,11 @@
 import type { ProviderEvent, ProviderToolActivity } from "../types";
 import type { ServerNotification } from "./generated/ServerNotification";
 import type { ThreadItem } from "./generated/v2/ThreadItem";
-
-type ForwardCollabItem = Omit<
-  Extract<ThreadItem, { type: "collabAgentToolCall" }>,
-  "type"
-> & { type: "collabToolCall" };
+import {
+  normalizeCollabToolCallItem,
+  type NormalizedCollabToolCallItem,
+  type StableCollabToolCallItem,
+} from "./collab-item";
 
 type BoundaryNotification = ServerNotification | {
   method: string;
@@ -15,7 +15,7 @@ type BoundaryNotification = ServerNotification | {
 type ItemLifecycleParams = {
   threadId: string;
   turnId: string;
-  item: ThreadItem | ForwardCollabItem | UnknownItem;
+  item: ThreadItem | StableCollabToolCallItem | UnknownItem;
 };
 
 type UnknownItem = { type: string; id?: string } & Record<string, unknown>;
@@ -299,10 +299,12 @@ export class CodexEventNormalizer {
           }),
         }];
       case "collabAgentToolCall":
-      case "collabToolCall":
-        return isCollabItem(item)
-          ? [normalizeCollab(phase, item)]
+      case "collabToolCall": {
+        const collab = normalizeCollabToolCallItem(item);
+        return collab
+          ? [normalizeCollab(phase, collab)]
           : [unknownItemEvent(phase, item)];
+      }
       case "subAgentActivity":
         return [{
           type: "subagent_status",
@@ -367,73 +369,21 @@ function normalizeStatus(status: string): string {
 
 function normalizeCollab(
   phase: "started" | "completed",
-  item: Extract<ThreadItem, { type: "collabAgentToolCall" }> | ForwardCollabItem,
+  item: NormalizedCollabToolCallItem,
 ): Extract<ProviderEvent, { type: "subagent_activity" }> {
-  const operation = item.tool === "spawnAgent"
-    ? "spawn_agent"
-    : item.tool === "wait"
-      ? "wait"
-      : item.tool === "closeAgent"
-        ? "close_agent"
-        : "send_input";
   return {
     type: "subagent_activity",
     phase,
-    operation,
+    operation: item.operation,
     id: item.id,
-    status: normalizeStatus(item.status),
+    status: item.status,
     senderThreadId: item.senderThreadId,
     receiverThreadIds: item.receiverThreadIds,
-    newThreadIds: operation === "spawn_agent" ? item.receiverThreadIds : [],
+    newThreadIds: item.newThreadIds,
     prompt: item.prompt,
-    agents: Object.fromEntries(
-      Object.entries(item.agentsStates)
-        .filter(
-          (entry): entry is [string, NonNullable<(typeof entry)[1]>] => entry[1] !== undefined,
-        )
-        .map(([threadId, state]) => [
-          threadId,
-          { status: normalizeStatus(state.status), message: state.message },
-        ]),
-    ),
+    agents: item.agents,
   };
 }
-
-function isCollabItem(
-  item: unknown,
-): item is Extract<ThreadItem, { type: "collabAgentToolCall" }> | ForwardCollabItem {
-  if (!isRecord(item)) return false;
-  if (item.type !== "collabAgentToolCall" && item.type !== "collabToolCall") return false;
-  if (typeof item.id !== "string" || !COLLAB_TOOLS.has(String(item.tool))) return false;
-  if (!COLLAB_STATUSES.has(String(item.status))) return false;
-  if (typeof item.senderThreadId !== "string") return false;
-  if (!Array.isArray(item.receiverThreadIds) || !item.receiverThreadIds.every((id) => typeof id === "string")) {
-    return false;
-  }
-  if (item.prompt !== null && typeof item.prompt !== "string") return false;
-  if (item.model !== null && typeof item.model !== "string") return false;
-  if (item.reasoningEffort !== null && typeof item.reasoningEffort !== "string") return false;
-  if (!isRecord(item.agentsStates)) return false;
-  return Object.values(item.agentsStates).every((state) =>
-    state === undefined || (
-      isRecord(state) &&
-      COLLAB_AGENT_STATUSES.has(String(state.status)) &&
-      (state.message === null || typeof state.message === "string")
-    ),
-  );
-}
-
-const COLLAB_TOOLS = new Set(["spawnAgent", "sendInput", "resumeAgent", "wait", "closeAgent"]);
-const COLLAB_STATUSES = new Set(["inProgress", "completed", "failed"]);
-const COLLAB_AGENT_STATUSES = new Set([
-  "pendingInit",
-  "running",
-  "interrupted",
-  "completed",
-  "errored",
-  "shutdown",
-  "notFound",
-]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
