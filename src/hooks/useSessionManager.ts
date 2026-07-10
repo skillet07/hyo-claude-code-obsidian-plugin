@@ -258,12 +258,14 @@ export function useSessionManager(options: SessionManagerOptions) {
 
   const lifecycleRef = useRef(new SessionLifecycle<ProviderRuntime>());
   const latestProvidersRef = useRef(providerMap);
+  const publishedProvidersRef = useRef(providerMap);
   const previousProvidersRef = useRef(providerMap);
   const defaultProviderIdRef = useRef(defaultProviderId);
   defaultProviderIdRef.current = defaultProviderId;
   const streamStatesRef = useRef<Record<string, StreamState>>({});
   const visibleProviderErrorsRef = useRef<Record<string, string>>({});
   const turnGenerationRef = useRef<Record<string, number>>({});
+  const retiredTabIdsRef = useRef(new Set<string>());
   const openingSessionsRef = useRef(
     new WeakMap<ChatProvider, Set<string>>(),
   );
@@ -289,7 +291,21 @@ export function useSessionManager(options: SessionManagerOptions) {
   }, [defaultProviderId, providerMap, state.tabs]);
 
   useLayoutEffect(() => {
+    const previouslyPublished = publishedProvidersRef.current;
     latestProvidersRef.current = effectiveProviderMap;
+    publishedProvidersRef.current = effectiveProviderMap;
+    const retiredTabIds = new Set<string>();
+    for (const [providerId, previousProvider] of previouslyPublished) {
+      if (effectiveProviderMap.get(providerId) === previousProvider) continue;
+      for (const tabId of lifecycleRef.current.detachWhere(
+        (runtime) => runtime.providerId === providerId,
+      )) {
+        retiredTabIds.add(tabId);
+        retiredTabIdsRef.current.add(tabId);
+      }
+    }
+    if (retiredTabIds.size === 0) return;
+    for (const tabId of retiredTabIds) delete streamStatesRef.current[tabId];
   }, [effectiveProviderMap]);
 
   const resolveProvider = useCallback((providerId: ProviderId): ChatProvider => {
@@ -303,34 +319,34 @@ export function useSessionManager(options: SessionManagerOptions) {
   useEffect(() => {
     const previousProviders = previousProvidersRef.current;
     previousProvidersRef.current = effectiveProviderMap;
-    const retiredTabIds = new Set<string>();
+    const retiredTabIds = new Set(
+      [...retiredTabIdsRef.current].filter(
+        (tabId) => !lifecycleRef.current.getRuntime(tabId),
+      ),
+    );
+    retiredTabIdsRef.current.clear();
+    if (retiredTabIds.size > 0) {
+      setState((prev) => ({
+        ...prev,
+        tabs: prev.tabs.map((tab) =>
+          retiredTabIds.has(tab.id)
+            ? {
+                ...tab,
+                generating: false,
+                messages: tab.messages.map((message) =>
+                  message.role === "assistant" && message.streaming
+                    ? { ...message, streaming: false }
+                    : message,
+                ),
+              }
+            : tab,
+        ),
+      }));
+    }
     for (const [providerId, previousProvider] of previousProviders) {
       if (effectiveProviderMap.get(providerId) === previousProvider) continue;
-      for (const tabId of lifecycleRef.current.detachWhere(
-        (runtime) => runtime.providerId === providerId,
-      )) {
-        retiredTabIds.add(tabId);
-      }
       previousProvider.cleanup();
     }
-    if (retiredTabIds.size === 0) return;
-    for (const tabId of retiredTabIds) delete streamStatesRef.current[tabId];
-    setState((prev) => ({
-      ...prev,
-      tabs: prev.tabs.map((tab) =>
-        retiredTabIds.has(tab.id)
-          ? {
-              ...tab,
-              generating: false,
-              messages: tab.messages.map((message) =>
-                message.role === "assistant" && message.streaming
-                  ? { ...message, streaming: false }
-                  : message,
-              ),
-            }
-          : tab,
-      ),
-    }));
   }, [effectiveProviderMap]);
 
   // Unmount teardown must not enqueue React state updates.
@@ -988,8 +1004,23 @@ export function useSessionManager(options: SessionManagerOptions) {
               : tab.title;
           // Compaction: don't add a user message — just the streaming assistant marker
           const newMessages = meta?.isCompaction
-            ? [...tab.messages, assistantMsg]
-            : [...tab.messages, userMsg, assistantMsg];
+            ? [
+                ...tab.messages.map((message) =>
+                  message.role === "assistant" && message.streaming
+                    ? { ...message, streaming: false }
+                    : message,
+                ),
+                assistantMsg,
+              ]
+            : [
+                ...tab.messages.map((message) =>
+                  message.role === "assistant" && message.streaming
+                    ? { ...message, streaming: false }
+                    : message,
+                ),
+                userMsg,
+                assistantMsg,
+              ];
           return {
             ...tab,
             title,

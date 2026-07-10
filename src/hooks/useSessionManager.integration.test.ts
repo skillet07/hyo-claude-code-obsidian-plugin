@@ -163,9 +163,16 @@ interface HarnessProps {
   providers?: ChatProvider[];
   defaultProviderId?: ProviderId;
   providerDefaults?: Partial<Record<ProviderId, Partial<ProviderSessionOptions>>>;
+  onLayout?: () => void;
 }
 
-function Harness({ cliPath, providers, defaultProviderId, providerDefaults }: HarnessProps) {
+function Harness({
+  cliPath,
+  providers,
+  defaultProviderId,
+  providerDefaults,
+  onLayout,
+}: HarnessProps) {
   manager = useSessionManager({
     cliPath,
     cwd: "/tmp/vault",
@@ -176,6 +183,9 @@ function Harness({ cliPath, providers, defaultProviderId, providerDefaults }: Ha
     defaultProviderId,
     providerDefaults,
   });
+  React.useLayoutEffect(() => {
+    onLayout?.();
+  }, [onLayout]);
   return null;
 }
 
@@ -587,6 +597,50 @@ describe("useSessionManager lifecycle integration", () => {
     });
     expect(accepted).toBe(true);
     expect(providerB.runtimes).toHaveLength(1);
+  });
+
+  it("retires replaced-provider runtimes before passive cleanup", async () => {
+    const providerA = new FakeProvider("claude");
+    const providerB = new FakeProvider("claude");
+    providerMocks.providers.set("provider-a", providerA);
+    providerMocks.providers.set("provider-b", providerB);
+    await mount("provider-a");
+    act(() => manager.sendMessage("old provider turn"));
+    const oldRuntime = providerA.runtimes[0]!;
+    act(() => oldRuntime.emit({
+      type: "approval_requested",
+      requestId: "retired-approval",
+      toolName: "command",
+    }));
+
+    let exercisedBeforePassiveCleanup = false;
+    act(() => {
+      (renderer as any)?.unstable_flushSync(() => {
+        renderer?.update(React.createElement(Harness, {
+          cliPath: "provider-b",
+          onLayout: () => {
+            expect(providerA.cleanupCalls).toBe(0);
+            manager.sendPermissionResponse("retired-approval", "allow");
+            const compactAccepted = manager.compact();
+            manager.stopGeneration();
+            const sendAccepted = manager.sendMessage("new provider turn");
+
+            expect(compactAccepted).toBe(true);
+            expect(sendAccepted).toBe(true);
+            expect(oldRuntime.approvals).toEqual([]);
+            expect(oldRuntime.compactCalls).toBe(0);
+            expect(oldRuntime.interruptCalls).toBe(0);
+            expect(providerB.runtimes[0]?.compactCalls).toBe(1);
+            expect(providerB.runtimes[0]?.interruptCalls).toBe(1);
+            expect(providerB.runtimes[1]?.sent).toEqual(["new provider turn"]);
+            expect(providerA.cleanupCalls).toBe(0);
+            exercisedBeforePassiveCleanup = true;
+          },
+        }));
+      });
+    });
+    expect(exercisedBeforePassiveCleanup).toBe(true);
+    expect(providerA.cleanupCalls).toBe(1);
   });
 
   it("uses the global default only for newly created and replacement tabs", async () => {
