@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { SessionLifecycle } from "../../hooks/session-lifecycle";
 import type { ProviderEvent } from "../types";
 import type { CodexAppServerProcess } from "./app-server-process";
 import {
@@ -118,7 +119,61 @@ function runtimeOptions(onEvent: (event: ProviderEvent) => void, extra: Record<s
   };
 }
 
+async function expectAcceptedTurnToFailOnce(
+  provider: CodexProvider,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  const lifecycle = new SessionLifecycle<ReturnType<CodexProvider["createRuntime"]>>();
+  const finishTurn = vi.spyOn(lifecycle, "finishTurn");
+  expect(lifecycle.beginTurn("tab-1")).toBe(true);
+  const runtime = provider.createRuntime(runtimeOptions((event) => {
+    if (event.type === "turn_completed") lifecycle.finishTurn("tab-1");
+  }, extra));
+  lifecycle.attachRuntime("tab-1", runtime);
+
+  runtime.start();
+  runtime.send("accepted");
+
+  await vi.waitFor(() => expect(finishTurn).toHaveBeenCalledTimes(1));
+  expect(lifecycle.beginTurn("tab-1")).toBe(true);
+  provider.cleanup();
+}
+
 describe("CodexProvider runtime lifecycle", () => {
+  it("terminates an accepted turn once when connection initialization fails", async () => {
+    const process = createProcessController();
+    const provider = new CodexProvider({
+      appVersion: "0.3.0",
+      processFactory: async () => process.process,
+      clientFactory: async () => {
+        throw new Error("initialize failed");
+      },
+    });
+
+    await expectAcceptedTurnToFailOnce(provider);
+  });
+
+  it("terminates an accepted turn once when thread/start fails", async () => {
+    const threadStart = vi.fn(async () => {
+      throw new Error("thread start failed");
+    });
+    const { provider } = createHarness({ threadStart });
+
+    await expectAcceptedTurnToFailOnce(provider);
+  });
+
+  it("terminates an accepted turn once when thread/resume fails", async () => {
+    const threadResume = vi.fn(async () => {
+      throw new Error("thread resume failed");
+    });
+    const { provider } = createHarness({ threadResume });
+
+    await expectAcceptedTurnToFailOnce(provider, {
+      providerSessionId: "thread-existing",
+      resume: true,
+    });
+  });
+
   it("shares one lazy client across two runtimes and keeps concurrent turns scoped", async () => {
     const { provider, client, processFactory, clientFactory } = createHarness();
     const firstEvents: ProviderEvent[] = [];
@@ -360,11 +415,112 @@ describe("CodexProvider runtime lifecycle", () => {
 
     first.cleanup();
     first.cleanup();
+    expect(harness.client.turnInterrupt).not.toHaveBeenCalled();
     expect(second.isRunning()).toBe(true);
     harness.provider.cleanup();
     harness.provider.cleanup();
     await vi.waitFor(() => expect(process.stop).toHaveBeenCalledTimes(1));
     expect(second.isRunning()).toBe(false);
+  });
+
+  it("best-effort interrupts an active turn before runtime cleanup unregisters it", async () => {
+    const { provider, client } = createHarness();
+    const runtime = provider.createRuntime(runtimeOptions(() => undefined));
+    runtime.start();
+    runtime.send("active");
+    await vi.waitFor(() => expect(client.turnStart).toHaveBeenCalledTimes(1));
+
+    runtime.cleanup();
+    runtime.cleanup();
+
+    expect(client.turnInterrupt).toHaveBeenCalledTimes(1);
+    expect(client.turnInterrupt).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+  });
+
+  it("synchronously cancels all pending server requests owned by a cleaned runtime", async () => {
+    const { provider, handlers } = createHarness();
+    const runtime = provider.createRuntime(runtimeOptions(() => undefined));
+    runtime.start();
+    runtime.send("active");
+    await vi.waitFor(() => expect(runtime.ready).toBe(true));
+
+    const command = handlers[0]!.onServerRequest({
+      id: "cleanup-command",
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "command-1",
+        command: "pwd", cwd: "/vault", reason: null,
+        environmentId: "env", approvalId: null, commandActions: null,
+        networkApprovalContext: null, proposedExecpolicyAmendment: null,
+        proposedNetworkPolicyAmendments: null,
+      },
+    });
+    const file = handlers[0]!.onServerRequest({
+      id: "cleanup-file",
+      method: "item/fileChange/requestApproval",
+      params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "file-1",
+        startedAtMs: 1, reason: null, grantRoot: null,
+      },
+    });
+    const permissions = handlers[0]!.onServerRequest({
+      id: "cleanup-permissions",
+      method: "item/permissions/requestApproval",
+      params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "permissions-1",
+        environmentId: "env", startedAtMs: 1, cwd: "/vault",
+        reason: "Need access",
+        permissions: { network: { enabled: true }, fileSystem: null },
+      },
+    });
+    const question = handlers[0]!.onServerRequest({
+      id: "cleanup-question",
+      method: "item/tool/requestUserInput",
+      params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "question-1",
+        autoResolutionMs: null,
+        questions: [{
+          id: "q", header: "Q", question: "Answer?",
+          isOther: false, isSecret: false, options: null,
+        }],
+      },
+    });
+
+    runtime.cleanup();
+
+    await expect(command).resolves.toEqual({ decision: "cancel" });
+    await expect(file).resolves.toEqual({ decision: "cancel" });
+    await expect(permissions).resolves.toEqual({ permissions: {}, scope: "turn" });
+    await expect(question).resolves.toEqual({ answers: {} });
+  });
+
+  it("immediately cancels a late approval after its runtime unregisters", async () => {
+    const { provider, handlers } = createHarness();
+    const runtime = provider.createRuntime(runtimeOptions(() => undefined));
+    runtime.start();
+    runtime.send("active");
+    await vi.waitFor(() => expect(runtime.ready).toBe(true));
+    runtime.cleanup();
+
+    const late = handlers[0]!.onServerRequest({
+      id: "late-command",
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "late-1",
+        command: "pwd", cwd: "/vault", reason: null,
+        environmentId: "env", approvalId: null, commandActions: null,
+        networkApprovalContext: null, proposedExecpolicyAmendment: null,
+        proposedNetworkPolicyAmendments: null,
+      },
+    });
+
+    await expect(Promise.race([
+      late,
+      new Promise((resolve) => setTimeout(() => resolve("timed out"), 25)),
+    ])).resolves.toEqual({ decision: "cancel" });
   });
 
   it("stops the shared process once when cleanup races initialization", async () => {

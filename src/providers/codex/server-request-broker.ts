@@ -134,6 +134,34 @@ export class CodexServerRequestBroker {
     return true;
   }
 
+  cancelRequest(uiRequestId: string): boolean {
+    const requestId = this.requestIdsByUiKey.get(uiRequestId);
+    const pending = requestId === undefined ? undefined : this.pending.get(requestId);
+    if (requestId === undefined || !pending) return false;
+    this.finish(
+      requestId,
+      pending,
+      safeCancellationResponse(pending.kind),
+      "server",
+    );
+    return true;
+  }
+
+  cancelThread(threadId: string): number {
+    let cancelled = 0;
+    for (const [requestId, pending] of [...this.pending]) {
+      if (pending.threadId !== threadId) continue;
+      this.finish(
+        requestId,
+        pending,
+        safeCancellationResponse(pending.kind),
+        "server",
+      );
+      cancelled++;
+    }
+    return cancelled;
+  }
+
   dispose(): void {
     for (const [requestId, pending] of [...this.pending]) {
       this.finish(requestId, pending, null, "server");
@@ -314,6 +342,18 @@ function toUiRequestId(requestId: RequestId): string {
 
 function asError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
+}
+
+function safeCancellationResponse(kind: PendingKind): unknown {
+  switch (kind) {
+    case "command":
+    case "file":
+      return { decision: "cancel" };
+    case "permissions":
+      return { permissions: {}, scope: "turn" };
+    case "question":
+      return { answers: {} };
+  }
 }
 
 function mapCommandResponse(

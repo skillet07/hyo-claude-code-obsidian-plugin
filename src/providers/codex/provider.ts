@@ -320,8 +320,19 @@ export class CodexProvider implements ChatProvider {
 
   unregisterRuntime(runtime: CodexRuntime): void {
     if (this.runtimes.get(runtime.runtimeId) !== runtime) return;
+    const connection = this.active;
+    if (connection && runtime.threadId) {
+      connection.broker.cancelThread(runtime.threadId);
+    }
+    if (connection) {
+      for (const [requestId, owner] of connection.requestOwners) {
+        if (owner.runtimeId === runtime.runtimeId) {
+          connection.requestOwners.delete(requestId);
+        }
+      }
+    }
     this.runtimes.delete(runtime.runtimeId);
-    this.active?.router.unregisterRuntime(runtime.runtimeId);
+    connection?.router.unregisterRuntime(runtime.runtimeId);
   }
 
   respondApproval(
@@ -392,7 +403,7 @@ export class CodexProvider implements ChatProvider {
     const requestOwners = new Map<string, PendingRequestOwner>();
     let connection: ActiveConnection | undefined;
     const broker = new CodexServerRequestBroker((event) => {
-      this.routeBrokerEvent(connection, requestOwners, event);
+      this.routeBrokerEvent(connection, broker, requestOwners, event);
     });
     const handlers: CodexConnectionHandlers = {
       onNotification: (notification) => {
@@ -439,6 +450,7 @@ export class CodexProvider implements ChatProvider {
 
   private routeBrokerEvent(
     connection: ActiveConnection | undefined,
+    broker: CodexServerRequestBroker,
     requestOwners: Map<string, PendingRequestOwner>,
     event: ProviderEvent,
   ): void {
@@ -446,7 +458,10 @@ export class CodexProvider implements ChatProvider {
       const runtime = [...this.runtimes.values()].find(
         (candidate) => candidate.threadId === event.threadId,
       );
-      if (!runtime) return;
+      if (!runtime) {
+        broker.cancelRequest(event.requestId);
+        return;
+      }
       requestOwners.set(event.requestId, {
         runtimeId: runtime.runtimeId,
         ...(event.type === "approval_requested"
@@ -533,9 +548,10 @@ export class CodexRuntime implements ProviderRuntime {
   private attachedGeneration: number | undefined;
   private attachPromise: Promise<void> | undefined;
   private turnInFlight = false;
-  private turnFailureReported = false;
   private failureGeneration: number | undefined;
   private reportedErrors = new WeakSet<Error>();
+  private sendSequence = 0;
+  private activeSend: { id: number; terminal: boolean } | undefined;
 
   constructor(
     readonly runtimeId: string,
@@ -553,7 +569,7 @@ export class CodexRuntime implements ProviderRuntime {
     if (this.cleaned || this.started) return;
     this.started = true;
     void this.provider.ensureRuntimeThread(this).catch((error: unknown) => {
-      this.reportError(error, false);
+      this.reportError(error);
     });
   }
 
@@ -564,10 +580,12 @@ export class CodexRuntime implements ProviderRuntime {
   send(content: string | unknown[]): void {
     if (this.cleaned) return;
     if (!this.started) this.start();
-    this.turnFailureReported = false;
+    const sendId = ++this.sendSequence;
+    this.activeSend = { id: sendId, terminal: false };
     void this.sendAsync(content).catch((error: unknown) => {
       this.turnInFlight = false;
-      if (!this.turnFailureReported) this.reportError(error, true);
+      if (this.isSendPending(sendId)) this.reportError(error);
+      this.finalizeSend(sendId, error);
     });
   }
 
@@ -577,7 +595,7 @@ export class CodexRuntime implements ProviderRuntime {
     void connection.client.turnInterrupt({
       threadId: this.threadId,
       turnId: this.currentTurnId,
-    }).catch((error: unknown) => this.reportError(error, false));
+    }).catch((error: unknown) => this.reportError(error));
   }
 
   respondApproval(
@@ -603,11 +621,23 @@ export class CodexRuntime implements ProviderRuntime {
       const connection = await this.provider.ensureRuntimeThread(this);
       if (!this.threadId) throw new Error("Codex thread is not ready");
       await connection.client.threadCompact({ threadId: this.threadId });
-    })().catch((error: unknown) => this.reportError(error, false));
+    })().catch((error: unknown) => this.reportError(error));
   }
 
   cleanup(): void {
     if (this.cleaned) return;
+    const connection = this.provider.getActiveConnection();
+    if (
+      this.turnInFlight &&
+      connection &&
+      this.threadId &&
+      this.currentTurnId
+    ) {
+      void connection.client.turnInterrupt({
+        threadId: this.threadId,
+        turnId: this.currentTurnId,
+      }).catch(() => undefined);
+    }
     this.cleaned = true;
     this.started = false;
     this.ready = false;
@@ -629,7 +659,10 @@ export class CodexRuntime implements ProviderRuntime {
 
   deliver(event: ProviderEvent): void {
     if (this.cleaned) return;
-    if (event.type === "turn_completed") this.turnInFlight = false;
+    if (event.type === "turn_completed") {
+      if (!this.acceptTerminalEvent()) return;
+      this.turnInFlight = false;
+    }
     this.options.onEvent(event);
   }
 
@@ -643,20 +676,54 @@ export class CodexRuntime implements ProviderRuntime {
     if (this.turnInFlight && this.failureGeneration !== connection.generation) {
       this.failureGeneration = connection.generation;
       this.turnInFlight = false;
-      this.turnFailureReported = true;
       const message = `${error.message}. Send again to reconnect and resume this Codex thread.`;
-      this.deliver({
-        type: "error",
-        message,
-        willRetry: false,
+      this.reportError(new Error(message), {
         details: "Send again to reconnect and resume this Codex thread.",
       });
-      this.deliver({
-        type: "turn_completed",
-        status: "failed",
-        error: message,
-      });
+      this.finalizeActiveSend(message);
     }
+  }
+
+  private acceptTerminalEvent(): boolean {
+    if (!this.activeSend) return true;
+    if (this.activeSend.terminal) return false;
+    this.activeSend.terminal = true;
+    return true;
+  }
+
+  private finalizeSend(sendId: number, value: unknown): void {
+    if (!this.activeSend || this.activeSend.id !== sendId) return;
+    const error = value instanceof Error ? value : new Error(String(value));
+    this.finalizeActiveSend(error.message);
+  }
+
+  private isSendPending(sendId: number): boolean {
+    return this.activeSend?.id === sendId && !this.activeSend.terminal;
+  }
+
+  private finalizeActiveSend(message: string): void {
+    if (this.cleaned) return;
+    if (!this.acceptTerminalEvent()) return;
+    this.options.onEvent({
+      type: "turn_completed",
+      status: "failed",
+      error: message,
+    });
+  }
+
+  private reportError(
+    value: unknown,
+    extra: { details?: string } = {},
+  ): void {
+    const error = value instanceof Error ? value : new Error(String(value));
+    if (this.reportedErrors.has(error)) return;
+    this.reportedErrors.add(error);
+    this.deliver({
+      type: "error",
+      message: error.message,
+      willRetry: false,
+      ...(extra.details ? { details: extra.details } : {}),
+    });
   }
 
   private async attachToConnection(connection: ActiveConnection): Promise<void> {
@@ -699,10 +766,17 @@ export class CodexRuntime implements ProviderRuntime {
       threadId: this.threadId,
       input,
     });
+    this.currentTurnId = response.turn.id;
+    if (this.cleaned) {
+      await connection.client.turnInterrupt({
+        threadId: this.threadId,
+        turnId: response.turn.id,
+      }).catch(() => undefined);
+      return;
+    }
     if (!this.provider.isActive(connection)) {
       throw new Error("Codex app-server connection was lost while starting the turn");
     }
-    this.currentTurnId = response.turn.id;
     connection.router.bindTurn(this.runtimeId, response.turn.id);
     this.emitSessionMetadata();
   }
@@ -719,15 +793,6 @@ export class CodexRuntime implements ProviderRuntime {
     });
   }
 
-  private reportError(value: unknown, completeTurn: boolean): void {
-    const error = value instanceof Error ? value : new Error(String(value));
-    if (this.reportedErrors.has(error)) return;
-    this.reportedErrors.add(error);
-    this.deliver({ type: "error", message: error.message, willRetry: false });
-    if (completeTurn) {
-      this.deliver({ type: "turn_completed", status: "failed", error: error.message });
-    }
-  }
 }
 
 function threadConfiguration(options: ProviderRuntimeOptions): Omit<ThreadStartParams, "threadId"> {
