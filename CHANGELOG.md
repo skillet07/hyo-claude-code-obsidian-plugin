@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.0 — Claude Code + Codex
+
+### Added
+
+- **Multi-provider architecture** — Hyo now registers Claude Code and Codex behind provider-neutral runtime, event, history, and UI contracts. Claude remains the default; changing the default affects new tabs only, and every tab keeps an immutable provider identity.
+- **Official stable Codex app-server integration** — Codex uses the stdio JSONL/JSON-RPC `initialize` / `initialized`, thread, turn, item, account, model, skill, and rate-limit APIs. Hyo does not enable experimental APIs and does not fall back to `codex exec`.
+- **Codex streaming and tools** — assistant text, reasoning, plans, token/context updates, warnings/errors, command execution, file changes, MCP/dynamic tools, web search, images, sleep, and subagent collaboration activity are normalized into the existing Hyo chat UI.
+- **Codex interaction surfaces** — inline approvals and questions, interrupt, history loading/renaming, stable resume, compact, live model/reasoning controls, skills, account rate limits, and provider-scoped buffering/request routing.
+- **Codex authentication** — existing CLI authentication is reused. Hyo can also start and cancel official ChatGPT browser or device-code login flows and display account state without storing provider passwords or API keys.
+- **Codex safety controls** — new Codex settings default to `on-request`, `workspace-write`, and network off. Read-only and danger-full-access modes are available, with an explicit warning before full access is saved.
+- **Generated protocol bindings** — stable bindings are pinned to Codex CLI `0.144.1`, bigint wire declarations are normalized to JavaScript numbers, and `npm run codex:check-types` regenerates in a temporary directory to detect committed drift without modifying the repository.
+- **Opt-in real subagent smoke** — `npm run smoke:codex` requires `HYO_CODEX_SMOKE=1` plus a caller-supplied fixture, uses read-only/no-network stable app-server calls, fails safe on approvals/questions, requires actual spawn and terminal collaboration evidence, interrupts on failure, and is excluded from normal tests so quota is never spent accidentally.
+- **Required release gate** — `npm run verify` runs typecheck, the complete Vitest suite, binding drift detection, production build, and whitespace/error-marker checks through `git diff --check`.
+
+### Compatibility and migration
+
+- The plugin id remains `hyo-plugin`, the desktop-only requirement is unchanged, and the release identity is now **Hyo - Claude Code & Codex for Obsidian**.
+- Existing flat Claude settings migrate into the Claude provider section without converting Claude sessions or changing the default provider. Existing Claude transport, permissions, agents, plan review, usage/context, recovery, attachments, voice, and history behavior remain supported.
+- Codex runtime support requires stable CLI `0.144.1` or newer. Reproducible generated bindings require the pinned `0.144.1` generator.
+
+### Verification status
+
+- Automated coverage exercises provider isolation, runtime lifecycle, early-event buffering, request ownership/cancellation, streaming and history mapping, auth/model/skill/rate-limit surfaces, safety defaults, version enforcement, Windows command handling, binding comparison/cleanup, JSONL framing, smoke opt-in, and collaboration-event assertions.
+- `npm run smoke:codex` is intentionally operator-run because it uses a real account and quota. The packaged Obsidian release matrix for macOS, Linux, and Windows is also operator-run. Neither is claimed as manually completed here.
+
 ## 0.3.11
 
 ### Fixes

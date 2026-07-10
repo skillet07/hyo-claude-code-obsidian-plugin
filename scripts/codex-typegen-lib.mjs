@@ -99,30 +99,11 @@ export function replaceGeneratedTypesAtomically({
   let swapCompleted = false;
 
   try {
-    generateInto(temporaryOutput);
-    const result = normalizeBigIntWireTypes(temporaryOutput);
-    if (result.typeFiles === 0) {
-      throw new Error("Codex type generation produced no TypeScript files");
-    }
-    validateNoBigIntWireTypes(temporaryOutput);
-    writeFileSync(
-      join(temporaryOutput, "CODEX_CLI_VERSION"),
-      `${generatorVersion}\n`,
-      "utf8",
-    );
-    writeFileSync(
-      join(temporaryOutput, "HYO_WIRE_TYPES.md"),
-      [
-        "# Hyo Codex wire type normalization",
-        "",
-        "App-server JSON numbers are parsed by JSON.parse as JavaScript numbers.",
-        "The Codex generator emits some bigint declarations for counts, limits, durations, and timestamps;",
-        "Hyo normalizes those declarations to number so exposed production types match runtime values.",
-        "These protocol values are expected to remain within JavaScript's safe integer range.",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
+    const result = generateStableTypes({
+      outputDirectory: temporaryOutput,
+      generatorVersion,
+      generateInto,
+    });
 
     if (existsSync(outputDirectory)) {
       renameSync(outputDirectory, backupDirectory);
@@ -145,6 +126,92 @@ export function replaceGeneratedTypesAtomically({
       rmSync(backupDirectory, { recursive: true, force: true });
     }
   }
+}
+
+export function checkGeneratedTypes({
+  committedDirectory,
+  generatorVersion,
+  generateInto,
+  temporaryParent,
+}) {
+  mkdirSync(temporaryParent, { recursive: true });
+  const temporaryRoot = mkdtempSync(join(temporaryParent, "hyo-codex-types-check-"));
+  const temporaryOutput = join(temporaryRoot, "generated");
+  try {
+    const generated = generateStableTypes({
+      outputDirectory: temporaryOutput,
+      generatorVersion,
+      generateInto,
+    });
+    const differences = compareDirectoryTrees(
+      committedDirectory,
+      temporaryOutput,
+    );
+    return {
+      matches: differences.length === 0,
+      differences,
+      generated,
+    };
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+function generateStableTypes({ outputDirectory, generatorVersion, generateInto }) {
+  generateInto(outputDirectory);
+  const result = normalizeBigIntWireTypes(outputDirectory);
+  if (result.typeFiles === 0) {
+    throw new Error("Codex type generation produced no TypeScript files");
+  }
+  validateNoBigIntWireTypes(outputDirectory);
+  writeFileSync(
+    join(outputDirectory, "CODEX_CLI_VERSION"),
+    `${generatorVersion}\n`,
+    "utf8",
+  );
+  writeFileSync(
+    join(outputDirectory, "HYO_WIRE_TYPES.md"),
+    [
+      "# Hyo Codex wire type normalization",
+      "",
+      "App-server JSON numbers are parsed by JSON.parse as JavaScript numbers.",
+      "The Codex generator emits some bigint declarations for counts, limits, durations, and timestamps;",
+      "Hyo normalizes those declarations to number so exposed production types match runtime values.",
+      "These protocol values are expected to remain within JavaScript's safe integer range.",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return result;
+}
+
+function compareDirectoryTrees(committedDirectory, generatedDirectory) {
+  const committedFiles = listFiles(committedDirectory);
+  const generatedFiles = listFiles(generatedDirectory);
+  const paths = [...new Set([...committedFiles.keys(), ...generatedFiles.keys()])].sort();
+  const differences = [];
+  for (const path of paths) {
+    if (!generatedFiles.has(path)) {
+      differences.push(`missing from generated output: ${path}`);
+    } else if (!committedFiles.has(path)) {
+      differences.push(`missing from committed bindings: ${path}`);
+    } else if (!committedFiles.get(path).equals(generatedFiles.get(path))) {
+      differences.push(`content differs: ${path}`);
+    }
+  }
+  return differences;
+}
+
+function listFiles(root, directory = root, files = new Map()) {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) listFiles(root, path, files);
+    else if (entry.isFile()) {
+      const relativePath = path.slice(root.length + 1).replaceAll("\\", "/");
+      files.set(relativePath, readFileSync(path));
+    }
+  }
+  return files;
 }
 
 export function normalizeBigIntWireTypes(outputDirectory) {

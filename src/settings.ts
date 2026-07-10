@@ -52,7 +52,10 @@ export class HyoSettingTab extends PluginSettingTab {
     const header = containerEl.createEl("div", {
       attr: { style: "display: flex; align-items: baseline; gap: 12px; margin-bottom: 0;" },
     });
-    header.createEl("h2", { text: "Hyo Plugin", attr: { style: "margin: 0;" } });
+    header.createEl("h2", {
+      text: "Hyo — Claude Code & Codex for Obsidian",
+      attr: { style: "margin: 0;" },
+    });
     this.savedIndicator = header.createEl("span", {
       text: "Saved",
       attr: {

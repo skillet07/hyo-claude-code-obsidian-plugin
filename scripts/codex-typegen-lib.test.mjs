@@ -1,9 +1,17 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildTypegenCommandSpec,
+  checkGeneratedTypes,
   getCodexCliCommand,
   replaceGeneratedTypesAtomically,
 } from "./codex-typegen-lib.mjs";
@@ -85,6 +93,81 @@ describe("replaceGeneratedTypesAtomically", () => {
     expect(readFileSync(join(outputDirectory, "HYO_WIRE_TYPES.md"), "utf8")).toMatch(
       /JSON numbers.*bigint.*number/is,
     );
+  });
+});
+
+describe("checkGeneratedTypes", () => {
+  it("reports deterministic file drift and removes its temporary output", () => {
+    const { outputDirectory, root } = createDestination();
+    const temporaryParent = join(root, "checks");
+    mkdirSync(temporaryParent);
+    writeFileSync(join(temporaryParent, ".keep"), "kept\n");
+
+    const result = checkGeneratedTypes({
+      committedDirectory: outputDirectory,
+      generatorVersion: "0.144.1",
+      temporaryParent,
+      generateInto: (temporaryOutput) => {
+        mkdirSync(temporaryOutput, { recursive: true });
+        writeFileSync(
+          join(temporaryOutput, "Current.ts"),
+          "export type Current = bigint;\n",
+        );
+      },
+    });
+
+    expect(result).toMatchObject({
+      matches: false,
+      differences: [
+        "missing from committed bindings: CODEX_CLI_VERSION",
+        "missing from committed bindings: Current.ts",
+        "missing from generated output: Existing.ts",
+        "missing from committed bindings: HYO_WIRE_TYPES.md",
+      ],
+    });
+    expect(result.generated).toEqual({
+      filesChanged: 1,
+      replacements: 1,
+      typeFiles: 1,
+    });
+    expect(readFileSync(join(outputDirectory, "Existing.ts"), "utf8")).toBe(
+      "export type Existing = true;\n",
+    );
+    expect(() => readFileSync(join(outputDirectory, "Current.ts"), "utf8")).toThrow();
+    expect(readdirSync(temporaryParent)).toEqual([".keep"]);
+  });
+
+  it("matches normalized generated output without touching committed bindings", () => {
+    const root = mkdtempSync(join(tmpdir(), "hyo-codex-typecheck-test-"));
+    temporaryRoots.push(root);
+    const committedDirectory = join(root, "committed");
+    const temporaryParent = join(root, "checks");
+    mkdirSync(temporaryParent);
+    writeFileSync(join(temporaryParent, ".keep"), "kept\n");
+    replaceGeneratedTypesAtomically({
+      outputDirectory: committedDirectory,
+      generatorVersion: "0.144.1",
+      generateInto: (output) => {
+        mkdirSync(output, { recursive: true });
+        writeFileSync(join(output, "Count.ts"), "export type Count = bigint;\n");
+      },
+    });
+    const before = readFileSync(join(committedDirectory, "Count.ts"), "utf8");
+
+    const result = checkGeneratedTypes({
+      committedDirectory,
+      generatorVersion: "0.144.1",
+      temporaryParent,
+      generateInto: (output) => {
+        mkdirSync(output, { recursive: true });
+        writeFileSync(join(output, "Count.ts"), "export type Count = bigint;\n");
+      },
+    });
+
+    expect(result.matches).toBe(true);
+    expect(result.differences).toEqual([]);
+    expect(readFileSync(join(committedDirectory, "Count.ts"), "utf8")).toBe(before);
+    expect(readdirSync(temporaryParent)).toEqual([".keep"]);
   });
 });
 
