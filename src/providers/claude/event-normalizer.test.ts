@@ -178,6 +178,39 @@ describe("ClaudeEventNormalizer", () => {
     ]);
   });
 
+  it("does not reuse Write content from a completed turn for a later plan review", () => {
+    const normalizer = new ClaudeEventNormalizer(() => "current plan");
+    normalizer.normalize({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "write-1",
+            name: "Write",
+            input: { file_path: "notes.md", content: "unrelated earlier write" },
+          },
+        ],
+      },
+    });
+    normalizer.normalize({ type: "result" });
+
+    expect(
+      normalizer.normalize({
+        type: "control_request",
+        request_id: "plan-2",
+        request: { tool_name: "ExitPlanMode", input: {} },
+      }),
+    ).toEqual([
+      {
+        type: "plan_review_requested",
+        requestId: "plan-2",
+        planContent: "current plan",
+        allowedPrompts: [],
+      },
+    ]);
+  });
+
   it("normalizes turn completion, provider errors, and process closure", () => {
     const normalizer = new ClaudeEventNormalizer();
 

@@ -29,6 +29,7 @@ export class ClaudeEventNormalizer {
     }
 
     if (raw.type === "result") {
+      this.latestPlanContent = null;
       const firstModel: any = Object.values(raw.modelUsage || {})[0];
       const contextWindow = firstModel?.contextWindow;
       return [{
