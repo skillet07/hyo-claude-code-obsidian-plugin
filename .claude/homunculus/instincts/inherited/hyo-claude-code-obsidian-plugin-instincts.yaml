@@ -1,0 +1,673 @@
+# Instincts generated from https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+# Generated: 2026-07-10T18:12:27.185Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: hyo-claude-code-obsidian-plugin-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: fix, feat
+
+## Evidence
+
+- 34 commits analyzed
+- Detected conventional commit pattern
+- Examples: test: stabilize baseline tooling and session state, fix: preserve versioned Sonnet model IDs
+
+---
+id: hyo-claude-code-obsidian-plugin-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Commit Length
+
+## Action
+
+Keep commit messages concise (~41 characters)
+
+## Evidence
+
+- Average commit message length: 41 chars
+- Based on 34 commits
+
+---
+id: hyo-claude-code-obsidian-plugin-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Naming Files
+
+## Action
+
+Use PascalCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: PascalCase
+
+---
+id: hyo-claude-code-obsidian-plugin-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: hyo-claude-code-obsidian-plugin-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: hyo-claude-code-obsidian-plugin-arch-type-based
+trigger: "when adding new code"
+confidence: 0.8
+domain: architecture
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Arch Type Based
+
+## Action
+
+Place code in the appropriate type folder (components/, services/, utils/, etc.)
+
+## Evidence
+
+- Type-based module organization detected
+- Folders: components, hooks, providers
+
+---
+id: hyo-claude-code-obsidian-plugin-test-colocate
+trigger: "when writing tests"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Test Colocate
+
+## Action
+
+Place test file next to the source file (e.g., Button.test.tsx next to Button.tsx)
+
+## Evidence
+
+- Colocated test pattern detected
+- Tests live alongside source files
+
+---
+id: hyo-claude-code-obsidian-plugin-test-framework
+trigger: "when writing tests"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Test Framework
+
+## Action
+
+Use vitest as the test framework
+
+## Evidence
+
+- Test framework detected: vitest
+- File pattern: *.test.ts
+
+---
+id: hyo-claude-code-obsidian-plugin-test-naming
+trigger: "when creating a test file"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Test Naming
+
+## Action
+
+Name test files using the pattern: *.test.ts
+
+## Evidence
+
+- File pattern: *.test.ts
+- Consistent across test files
+
+---
+id: hyo-claude-code-obsidian-plugin-test-mocking
+trigger: "when mocking dependencies in tests"
+confidence: 0.75
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Test Mocking
+
+## Action
+
+Use vi.mock for mocking
+
+## Evidence
+
+- Mocking pattern detected: vi.mock
+- Consistent across test files
+
+---
+id: hyo-claude-code-obsidian-plugin-test-types
+trigger: "when planning tests for a feature"
+confidence: 0.7
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Test Types
+
+## Action
+
+Write unit, integration tests to match project standards
+
+## Evidence
+
+- Test types detected: unit, integration
+- Coverage config: no
+
+---
+id: hyo-claude-code-obsidian-plugin-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.75
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~5x per month
+- Files: src/*, src/components/*, src/hooks/*
+
+---
+id: hyo-claude-code-obsidian-plugin-workflow-add-or-evolve-provider-integration
+trigger: "when doing add or evolve provider integration"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Workflow Add Or Evolve Provider Integration
+
+## Action
+
+Follow the add-or-evolve-provider-integration workflow:
+1. Add or update files under src/providers/{provider}/ (e.g. app-server-client.ts, provider.ts, event-normalizer.ts, notification-router.ts, server-request-broker.ts, input-converter.ts, history-mapper.ts, generated/...)
+2. Update src/providers/index.ts and src/providers/types.ts to register the provider
+3. Update or add tests in src/providers/{provider}/ and src/hooks/useSessionManager.integration.test.ts
+4. Update src/components/ChatPanel.tsx and/or src/hooks/useSessionManager.ts for UI/session integration
+5. Update scripts/ for type generation or protocol tooling if needed
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: src/providers/codex/app-server-client.ts, src/providers/codex/app-server-process.ts, src/providers/codex/provider.ts
+
+---
+id: hyo-claude-code-obsidian-plugin-workflow-provider-bugfix-or-hardening
+trigger: "when doing provider bugfix or hardening"
+confidence: 0.7
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Workflow Provider Bugfix Or Hardening
+
+## Action
+
+Follow the provider-bugfix-or-hardening workflow:
+1. Edit src/providers/{provider}/*.ts and corresponding *.test.ts files
+2. Edit src/hooks/useSessionManager.ts and/or src/hooks/useSessionManager.integration.test.ts
+3. Potentially update src/components/ChatPanel.tsx or related UI files if the bug affects user interaction
+4. Update src/providers/types.ts if type changes are needed
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~4x per month
+- Files: src/providers/codex/provider.ts, src/providers/codex/provider.test.ts, src/providers/codex/event-normalizer.ts
+
+---
+id: hyo-claude-code-obsidian-plugin-workflow-provider-ui-and-settings-expansion
+trigger: "when doing provider ui and settings expansion"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Workflow Provider Ui And Settings Expansion
+
+## Action
+
+Follow the provider-ui-and-settings-expansion workflow:
+1. Edit or add src/components/*StatusControls*.tsx, src/components/HyoStatusBar*.tsx, src/components/Provider*.tsx
+2. Edit or add src/provider-onboarding.ts, src/provider-settings.ts, and their test files
+3. Edit src/settings.ts and styles.css for settings logic and styling
+4. Update tests for new UI/settings
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: src/components/CodexStatusControls.tsx, src/components/CodexStatusControls.test.tsx, src/components/HyoStatusBar.tsx
+
+---
+id: hyo-claude-code-obsidian-plugin-workflow-release-preparation-and-changelog-update
+trigger: "when doing release preparation and changelog update"
+confidence: 0.55
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Workflow Release Preparation And Changelog Update
+
+## Action
+
+Follow the release-preparation-and-changelog-update workflow:
+1. Update CHANGELOG.md, README.md, SETUP.md
+2. Update manifest.json, package.json, package-lock.json, versions.json
+3. Update or add release artifacts (e.g. hyo-plugin-beta.zip)
+4. Update or add scripts/check-*.mjs, scripts/smoke-*.mjs, scripts/typegen-*.mjs as needed
+5. Update src/settings.ts if settings or version info is exposed
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~1x per month
+- Files: CHANGELOG.md, README.md, SETUP.md
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-file-naming
+trigger: "When creating a new file"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct File Naming
+
+## Action
+
+Name files using PascalCase (e.g., ChatPanel.tsx)
+
+## Evidence
+
+- Pattern in src/components/ChatPanel.tsx
+- Pattern in src/hooks/useSessionManager.ts
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-function-naming
+trigger: "When defining a function"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Function Naming
+
+## Action
+
+Use camelCase for function names
+
+## Evidence
+
+- Pattern in src/hooks/useSessionManager.ts
+- Pattern in src/providers/codex/provider.ts
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-class-naming
+trigger: "When defining a class"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Class Naming
+
+## Action
+
+Use PascalCase for class names
+
+## Evidence
+
+- Pattern in src/components/ChatPanel.tsx
+- Pattern in src/providers/codex/provider.ts
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-constant-naming
+trigger: "When defining a constant"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Constant Naming
+
+## Action
+
+Use SCREAMING_SNAKE_CASE for constant names
+
+## Evidence
+
+- Pattern in src/providers/types.ts
+- Pattern in src/settings.ts
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-import-style
+trigger: "When importing modules"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Import Style
+
+## Action
+
+Use relative import paths
+
+## Evidence
+
+- Pattern in src/components/ChatPanel.tsx
+- Pattern in src/providers/codex/provider.ts
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-export-style
+trigger: "When exporting from a module"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in src/providers/index.ts
+- Pattern in src/components/ChatPanel.tsx
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-test-file-pattern
+trigger: "When creating a test file"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Test File Pattern
+
+## Action
+
+Name the file with the pattern *.test.ts or *.test.tsx
+
+## Evidence
+
+- Pattern in src/components/CodexStatusControls.test.tsx
+- Pattern in src/providers/codex/event-normalizer.test.ts
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-test-framework
+trigger: "When writing tests"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Test Framework
+
+## Action
+
+Use the Vitest framework for unit and integration tests
+
+## Evidence
+
+- Pattern in *.test.ts files
+- Pattern in vitest config
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-test-mocking
+trigger: "When mocking dependencies in tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Test Mocking
+
+## Action
+
+Use vi.mock for mocking
+
+## Evidence
+
+- Pattern in src/providers/codex/provider.test.ts
+- Pattern in src/hooks/useSessionManager.integration.test.ts
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-test-colocation
+trigger: "When adding tests for a module"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Test Colocation
+
+## Action
+
+Colocate test files next to the implementation files
+
+## Evidence
+
+- Pattern in src/components/CodexStatusControls.tsx and CodexStatusControls.test.tsx
+- Pattern in src/providers/codex/provider.ts and provider.test.ts
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-commit-format
+trigger: "When writing a commit message"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Commit Format
+
+## Action
+
+Use Conventional Commits format: <type>: <description> (e.g., fix: guard provider runtime lifecycle)
+
+## Evidence
+
+- Seen in commit 'fix: preserve versioned Sonnet model IDs'
+- Seen in commit 'feat: add Codex app-server protocol foundation'
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-commit-prefixes
+trigger: "When choosing a commit type"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Commit Prefixes
+
+## Action
+
+Use prefixes: fix, feat, refactor, chore, test
+
+## Evidence
+
+- Seen in commit 'fix: scope Claude plan content to turn'
+- Seen in commit 'refactor: add chat provider boundary'
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-add-provider-integration
+trigger: "When someone wants to add support for a new provider or majorly update provider integration"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Add Provider Integration
+
+## Action
+
+Add or update files under src/providers/{provider}/, update src/providers/index.ts and types.ts, update/add tests, update UI/session integration, update scripts for type generation if needed
+
+## Evidence
+
+- Workflow 'add-or-evolve-provider-integration'
+- Pattern in src/providers/codex/* and related files
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-provider-bugfix-hardening
+trigger: "When someone wants to fix a bug or improve reliability in provider integration"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Provider Bugfix Hardening
+
+## Action
+
+Edit provider implementation and test files, update session manager and UI if needed, update types if required
+
+## Evidence
+
+- Workflow 'provider-bugfix-or-hardening'
+- Pattern in src/providers/codex/provider.ts and provider.test.ts
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-provider-ui-settings
+trigger: "When someone wants to add new provider-related UI or settings, or improve onboarding/controls"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Provider Ui Settings
+
+## Action
+
+Edit/add UI component files, provider-onboarding/settings files, update styles and tests
+
+## Evidence
+
+- Workflow 'provider-ui-and-settings-expansion'
+- Pattern in src/components/CodexStatusControls.tsx and related files
+
+---
+id: hyo-claude-code-obsidian-plugin-instinct-release-preparation
+trigger: "When someone wants to cut a new release"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: skillet07/hyo-claude-code-obsidian-plugin
+---
+
+# Hyo Claude Code Obsidian Plugin Instinct Release Preparation
+
+## Action
+
+Update changelogs, documentation, manifest, version files, release artifacts, scripts, and settings as needed
+
+## Evidence
+
+- Workflow 'release-preparation-and-changelog-update'
+- Pattern in CHANGELOG.md, package.json, hyo-plugin-beta.zip
+
