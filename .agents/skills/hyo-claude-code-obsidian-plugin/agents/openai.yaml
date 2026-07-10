@@ -1,0 +1,6 @@
+interface:
+  display_name: "Hyo Claude Code Obsidian Plugin"
+  short_description: "Repo-specific patterns and workflows for hyo-claude-code-obsidian-plugin"
+  default_prompt: "Use the hyo-claude-code-obsidian-plugin repo skill to follow existing architecture, testing, and workflow conventions."
+policy:
+  allow_implicit_invocation: true
