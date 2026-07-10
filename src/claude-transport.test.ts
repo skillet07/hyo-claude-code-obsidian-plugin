@@ -17,4 +17,10 @@ describe("normalizeModelId", () => {
       "claude-sonnet-50[1m]"
     );
   });
+
+  it("preserves a versioned Sonnet 5 ID while removing its stale suffix", () => {
+    expect(normalizeModelId("claude-sonnet-5-20260701[1m]")).toBe(
+      "claude-sonnet-5-20260701"
+    );
+  });
 });
