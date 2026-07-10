@@ -141,6 +141,56 @@ async function expectAcceptedTurnToFailOnce(
 }
 
 describe("CodexProvider runtime lifecycle", () => {
+  it("tombstones a completed turn before an immediate successor can receive late events", async () => {
+    const { provider, client, handlers } = createHarness();
+    const lifecycle = new SessionLifecycle<ReturnType<CodexProvider["createRuntime"]>>();
+    const events: ProviderEvent[] = [];
+    const runtime = provider.createRuntime(runtimeOptions((event) => {
+      events.push(event);
+      if (event.type === "turn_completed") lifecycle.finishTurn("tab-1");
+    })) as CodexRuntime;
+    lifecycle.attachRuntime("tab-1", runtime);
+    runtime.start();
+    expect(lifecycle.beginTurn("tab-1")).toBe(true);
+    runtime.send("turn A");
+    await vi.waitFor(() => expect(client.turnStart).toHaveBeenCalledTimes(1));
+
+    handlers[0]!.onNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: { id: "turn-1", status: "completed", items: [] },
+      },
+    });
+    await vi.waitFor(() => expect(lifecycle.beginTurn("tab-1")).toBe(true));
+    runtime.send("turn B");
+    await vi.waitFor(() => expect(client.turnStart).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(runtime.currentTurnId).toBe("turn-2"));
+
+    const eventCount = events.length;
+    handlers[0]!.onNotification({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "late-a",
+        delta: "late A text",
+      },
+    });
+    handlers[0]!.onNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: { id: "turn-1", status: "completed", items: [] },
+      },
+    });
+
+    expect(events).toHaveLength(eventCount);
+    expect(events.some((event) => event.type === "text_delta" && event.delta === "late A text"))
+      .toBe(false);
+    expect(lifecycle.beginTurn("tab-1")).toBe(false);
+  });
+
   it("terminates an accepted turn once when connection initialization fails", async () => {
     const process = createProcessController();
     const provider = new CodexProvider({

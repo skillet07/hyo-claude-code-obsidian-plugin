@@ -81,9 +81,8 @@ describe("CodexNotificationRouter", () => {
     expect(router.getBufferedCount("thread-a", "turn-a")).toBe(0);
   });
 
-  it("retires a completed turn after a short grace and drops later notifications", async () => {
-    vi.useFakeTimers();
-    const router = new CodexNotificationRouter(undefined, { turnGraceMs: 10 });
+  it("tombstones a completed turn synchronously and drops later notifications", () => {
+    const router = new CodexNotificationRouter();
     const events: ProviderEvent[] = [];
     router.registerRuntime({ runtimeId: "tab-a", threadId: "thread-a", onEvent: (event) => events.push(event) });
     router.bindTurn("tab-a", "turn-a");
@@ -98,15 +97,12 @@ describe("CodexNotificationRouter", () => {
         },
       },
     } as never);
-    expect(router.getOwnedTurnCount()).toBe(1);
-
-    await vi.advanceTimersByTimeAsync(10);
     expect(router.getOwnedTurnCount()).toBe(0);
+    expect(router.getRetiredTurnCount()).toBe(1);
     const delivered = events.length;
     router.route(delta("thread-a", "turn-a", "late-item", "late"));
     expect(events).toHaveLength(delivered);
     expect(router.getBufferedCount("thread-a", "turn-a")).toBe(0);
-    vi.useRealTimers();
   });
 
   it("retires an owned turn explicitly and cleans its lifecycle state", () => {

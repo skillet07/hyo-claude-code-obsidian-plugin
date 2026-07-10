@@ -5,6 +5,7 @@ import type {
   ChatProvider,
   ProviderEvent,
   ProviderHistoryMessage,
+  ProviderId,
   ProviderRuntime,
   ProviderRuntimeOptions,
   ProviderSessionSummary,
@@ -34,7 +35,6 @@ import { useSessionManager } from "./useSessionManager";
 import { mapThreadHistory } from "../providers/codex/history-mapper";
 
 class FakeRuntime implements ProviderRuntime {
-  readonly providerId = "claude" as const;
   ready = false;
   started = false;
   cleanupCalls = 0;
@@ -43,7 +43,10 @@ class FakeRuntime implements ProviderRuntime {
   approvals: Array<{ requestId: string; behavior: string }> = [];
   questionResponses: Array<{ requestId: string; answers: Record<string, string> }> = [];
 
-  constructor(private readonly onEvent: (event: ProviderEvent) => void) {}
+  constructor(
+    readonly providerId: ProviderId,
+    private readonly onEvent: (event: ProviderEvent) => void,
+  ) {}
 
   start(): void {
     this.started = true;
@@ -108,8 +111,10 @@ class FakeProvider implements ChatProvider {
   history: ProviderHistoryMessage[] = [];
   cleanupCalls = 0;
 
+  constructor(private readonly runtimeProviderId: ProviderId = "claude") {}
+
   createRuntime(options: ProviderRuntimeOptions): ProviderRuntime {
-    const runtime = new FakeRuntime(options.onEvent);
+    const runtime = new FakeRuntime(this.runtimeProviderId, options.onEvent);
     this.runtimes.push(runtime);
     return runtime;
   }
@@ -176,6 +181,47 @@ afterEach(() => {
 });
 
 describe("useSessionManager lifecycle integration", () => {
+  it("keeps an unspecified Claude error nonterminal and rejects an overlapping send", async () => {
+    const provider = new FakeProvider("claude");
+    providerMocks.providers.set("provider-a", provider);
+    await mount("provider-a");
+    act(() => manager.sendMessage("hello"));
+
+    act(() => provider.runtimes[0]!.emit({
+      type: "error",
+      message: "stderr diagnostic",
+    }));
+
+    expect(manager.activeGenerating).toBe(true);
+    expect(manager.activeMessages.at(-1)?.streaming).toBe(true);
+    expect(manager.activeMessages.at(-1)?.content).toBe("");
+    expect(manager.sendMessage("overlap")).toBe(false);
+    expect(provider.runtimes[0]!.sent).toEqual(["hello"]);
+  });
+
+  it("keeps a retrying Codex error visible but nonterminal until turn completion", async () => {
+    const provider = new FakeProvider("codex");
+    providerMocks.providers.set("provider-a", provider);
+    await mount("provider-a");
+    act(() => manager.sendMessage("hello"));
+    const runtime = provider.runtimes[0]!;
+
+    act(() => runtime.emit({
+      type: "error",
+      message: "retrying transport",
+      willRetry: true,
+    }));
+
+    expect(manager.activeGenerating).toBe(true);
+    expect(manager.activeMessages.at(-1)?.streaming).toBe(true);
+    expect(manager.activeMessages.at(-1)?.content).toContain("retrying transport");
+    expect(manager.sendMessage("overlap")).toBe(false);
+
+    act(() => runtime.emit({ type: "turn_completed", status: "completed" }));
+    expect(manager.activeGenerating).toBe(false);
+    expect(manager.activeMessages.at(-1)?.streaming).toBe(false);
+  });
+
   it("renders one actionable error and finalizes a failed provider turn", async () => {
     const provider = new FakeProvider();
     providerMocks.providers.set("provider-a", provider);

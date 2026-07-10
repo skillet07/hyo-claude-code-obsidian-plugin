@@ -653,7 +653,9 @@ export class CodexProvider implements ChatProvider {
   }
 
   retireRuntimeTurn(runtime: CodexRuntime, turnId: string): void {
-    this.active?.requestRouter.retireRuntimeTurn(runtime, turnId);
+    const connection = this.active;
+    connection?.router.retireTurn(runtime.runtimeId, turnId);
+    connection?.requestRouter.retireRuntimeTurn(runtime, turnId);
   }
 
   respondApproval(

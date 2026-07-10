@@ -288,7 +288,11 @@ export function useSessionManager(options: SessionManagerOptions) {
     []
   );
 
-  const surfaceProviderError = useCallback((tabId: string, error: string) => {
+  const surfaceProviderError = useCallback((
+    tabId: string,
+    error: string,
+    terminal: boolean,
+  ) => {
     const text = `Provider error: ${error}`;
     updateTabLastAssistant(tabId, (message) => {
       const alreadyVisible =
@@ -296,7 +300,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         (message.orderedBlocks ?? []).some(
           (block) => block.type === "text" && block.content?.includes(error),
         );
-      if (alreadyVisible) return { streaming: false };
+      if (alreadyVisible) return terminal ? { streaming: false } : {};
       if ((message.orderedBlocks ?? []).length > 0) {
         return {
           content: [message.content, text].filter(Boolean).join("\n\n"),
@@ -304,10 +308,13 @@ export function useSessionManager(options: SessionManagerOptions) {
             ...(message.orderedBlocks ?? []),
             { type: "text", content: text, turnIndex: Number.MAX_SAFE_INTEGER },
           ],
-          streaming: false,
+          ...(terminal ? { streaming: false } : {}),
         };
       }
-      return { content: text, streaming: false };
+      return {
+        content: text,
+        ...(terminal ? { streaming: false } : {}),
+      };
     });
   }, [updateTabLastAssistant]);
 
@@ -318,9 +325,10 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       if (event.type === "error") {
         console.error("[hyo] Provider error:", event.message);
+        if (event.willRetry === undefined) return;
         visibleProviderErrorsRef.current[tabId] = event.message;
-        surfaceProviderError(tabId, event.message);
-        if (!event.willRetry) {
+        surfaceProviderError(tabId, event.message, event.willRetry === false);
+        if (event.willRetry === false) {
           lifecycle.finishTurn(tabId);
           setState((prev) => ({
             ...prev,
@@ -507,7 +515,7 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       if (event.type === "turn_completed") {
         if (event.error && !visibleProviderErrorsRef.current[tabId]) {
-          surfaceProviderError(tabId, event.error);
+          surfaceProviderError(tabId, event.error, true);
         }
         delete visibleProviderErrorsRef.current[tabId];
         lifecycle.finishTurn(tabId);

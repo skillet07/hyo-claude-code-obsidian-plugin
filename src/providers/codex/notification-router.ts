@@ -24,7 +24,6 @@ export const CODEX_ROUTER_DEFAULTS = {
   maxBufferedPerItem: 64,
   maxBufferedTotal: 1024,
   bufferTtlMs: 30_000,
-  turnGraceMs: 250,
   retiredTurnTtlMs: 30_000,
 } as const;
 
@@ -32,7 +31,6 @@ export interface CodexNotificationRouterOptions {
   maxBufferedPerItem?: number;
   maxBufferedTotal?: number;
   bufferTtlMs?: number;
-  turnGraceMs?: number;
   retiredTurnTtlMs?: number;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number) => unknown;
@@ -44,7 +42,6 @@ export class CodexNotificationRouter {
   private readonly turnOwners = new Map<string, string>();
   private readonly bufferedByItem = new Map<string, BufferedEvents[]>();
   private readonly retiredTurns = new Map<string, number>();
-  private readonly retirementTimers = new Map<string, unknown>();
   private readonly tombstoneTimers = new Map<string, unknown>();
   private readonly options: Required<CodexNotificationRouterOptions>;
   private bufferedTotal = 0;
@@ -75,7 +72,6 @@ export class CodexNotificationRouter {
     for (const [key, owner] of this.turnOwners) {
       if (owner === runtimeId) {
         this.turnOwners.delete(key);
-        this.cancelRetirement(key);
       }
     }
     if (runtime && ![...this.runtimes.values()].some((candidate) => candidate.threadId === runtime.threadId)) {
@@ -83,9 +79,6 @@ export class CodexNotificationRouter {
       const prefix = `${runtime.threadId}\u0000`;
       for (const key of [...this.retiredTurns.keys()]) {
         if (key.startsWith(prefix)) this.clearRetiredTurn(key);
-      }
-      for (const key of [...this.retirementTimers.keys()]) {
-        if (key.startsWith(prefix)) this.cancelRetirement(key);
       }
     }
   }
@@ -147,7 +140,7 @@ export class CodexNotificationRouter {
     if (owner) {
       this.emit(owner, events);
       if (notification.method === "turn/completed") {
-        this.scheduleRetirement(turnKey);
+        this.retireTurnKey(turnKey);
       }
       return;
     }
@@ -176,10 +169,8 @@ export class CodexNotificationRouter {
 
   dispose(): void {
     if (this.expiryTimer !== undefined) this.options.clearTimer(this.expiryTimer);
-    for (const timer of this.retirementTimers.values()) this.options.clearTimer(timer);
     for (const timer of this.tombstoneTimers.values()) this.options.clearTimer(timer);
     this.expiryTimer = undefined;
-    this.retirementTimers.clear();
     this.tombstoneTimers.clear();
     this.turnOwners.clear();
     this.retiredTurns.clear();
@@ -206,7 +197,10 @@ export class CodexNotificationRouter {
     const turnKey = makeTurnKey(runtime.threadId, turnId);
     for (const entry of pending) {
       this.emit(runtime, entry.events);
-      if (entry.retireAfterDelivery) this.scheduleRetirement(turnKey);
+      if (entry.retireAfterDelivery) {
+        this.retireTurnKey(turnKey);
+        break;
+      }
     }
     this.scheduleExpiry();
   }
@@ -280,17 +274,8 @@ export class CodexNotificationRouter {
     }, Math.max(0, nearest - this.options.now()));
   }
 
-  private scheduleRetirement(turnKey: string): void {
-    this.cancelRetirement(turnKey);
-    const timer = this.options.setTimer(() => {
-      this.retirementTimers.delete(turnKey);
-      this.retireTurnKey(turnKey);
-    }, this.options.turnGraceMs);
-    this.retirementTimers.set(turnKey, timer);
-  }
-
   private retireTurnKey(turnKey: string): void {
-    this.cancelRetirement(turnKey);
+    if (this.retiredTurns.has(turnKey)) return;
     this.turnOwners.delete(turnKey);
     const [threadId, turnId] = splitTurnKey(turnKey);
     this.dropBuffers((entry) => entry.threadId === threadId && entry.turnId === turnId);
@@ -300,12 +285,6 @@ export class CodexNotificationRouter {
       this.retiredTurns.delete(turnKey);
     }, this.options.retiredTurnTtlMs);
     this.tombstoneTimers.set(turnKey, timer);
-  }
-
-  private cancelRetirement(turnKey: string): void {
-    const timer = this.retirementTimers.get(turnKey);
-    if (timer !== undefined) this.options.clearTimer(timer);
-    this.retirementTimers.delete(turnKey);
   }
 
   private clearRetiredTurn(turnKey: string): void {
