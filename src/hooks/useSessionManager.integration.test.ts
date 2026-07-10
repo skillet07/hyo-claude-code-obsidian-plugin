@@ -438,6 +438,44 @@ describe("useSessionManager lifecycle integration", () => {
       .toBe(false);
   });
 
+  it("rejects old history resolved after replacement render but before passive cleanup", async () => {
+    const providerA = new FakeProvider();
+    const providerB = new FakeProvider();
+    const pending = deferred<ProviderHistoryMessage[]>();
+    vi.spyOn(providerA, "loadSession").mockImplementation(() => pending.promise);
+    providerMocks.providers.set("provider-a", providerA);
+    providerMocks.providers.set("provider-b", providerB);
+    await mount("provider-a");
+    const session: ProviderSessionSummary = {
+      providerId: "claude",
+      id: "render-gap-session",
+      title: "Render gap",
+      date: new Date(),
+    };
+
+    let opening!: Promise<void>;
+    act(() => {
+      opening = manager.openPastSession(session);
+    });
+
+    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      (renderer as any)?.unstable_flushSync(() => {
+        renderer?.update(React.createElement(Harness, { cliPath: "provider-b" }));
+      });
+      pending.resolve([{ role: "assistant", content: "stale render-gap history" }]);
+      await opening;
+    } finally {
+      (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+    }
+    await act(async () => undefined);
+
+    expect(manager.tabs.some((tab) => tab.providerSessionId === "render-gap-session"))
+      .toBe(false);
+    expect(providerA.cleanupCalls).toBe(1);
+    expect(providerB.cleanupCalls).toBe(0);
+  });
+
   it("shows failed Codex turn status when reopening mapped history", async () => {
     const provider = new FakeProvider("codex");
     provider.history = mapThreadHistory({

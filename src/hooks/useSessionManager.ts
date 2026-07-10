@@ -242,9 +242,9 @@ export function useSessionManager(options: SessionManagerOptions) {
   pastSessionsRef.current = pastSessions;
 
   const lifecycleRef = useRef(new SessionLifecycle<ProviderRuntime>());
-  const registryRef = useRef(registry);
-  registryRef.current = registry;
-  const providersRef = useRef(providerMap);
+  const latestProvidersRef = useRef(providerMap);
+  latestProvidersRef.current = providerMap;
+  const previousProvidersRef = useRef(providerMap);
   const defaultProviderIdRef = useRef(defaultProviderId);
   defaultProviderIdRef.current = defaultProviderId;
   const streamStatesRef = useRef<Record<string, StreamState>>({});
@@ -258,11 +258,17 @@ export function useSessionManager(options: SessionManagerOptions) {
   const stateRef = useRef(state);
   stateRef.current = state;
 
+  const resolveProvider = useCallback((providerId: ProviderId): ChatProvider => {
+    const provider = latestProvidersRef.current.get(providerId);
+    if (!provider) throw new Error(`Provider "${providerId}" is not registered`);
+    return provider;
+  }, []);
+
   // Provider replacement happens while mounted. Detach only leases owned by
   // the retired provider so other providers can keep generating concurrently.
   useEffect(() => {
-    const previousProviders = providersRef.current;
-    providersRef.current = providerMap;
+    const previousProviders = previousProvidersRef.current;
+    previousProvidersRef.current = providerMap;
     const retiredTabIds = new Set<string>();
     for (const [providerId, previousProvider] of previousProviders) {
       if (providerMap.get(providerId) === previousProvider) continue;
@@ -298,7 +304,7 @@ export function useSessionManager(options: SessionManagerOptions) {
     return () => {
       mountedRef.current = false;
       lifecycleRef.current.detachAll();
-      for (const provider of providersRef.current.values()) provider.cleanup();
+      for (const provider of latestProvidersRef.current.values()) provider.cleanup();
     };
   }, []);
 
@@ -864,7 +870,7 @@ export function useSessionManager(options: SessionManagerOptions) {
   const renameTab = useCallback((id: string, title: string) => {
     const tab = stateRef.current.tabs.find((item) => item.id === id);
     if (tab?.providerSessionId) {
-      const provider = registryRef.current.resolve(tab.providerId);
+      const provider = resolveProvider(tab.providerId);
       void provider
         .renameSession(options.cwd, tab.providerSessionId, title)
         .then(() => refreshPastSessions(tab.providerId))
@@ -887,7 +893,7 @@ export function useSessionManager(options: SessionManagerOptions) {
       const tabId = stateRef.current.activeTabId;
       const owningTab = stateRef.current.tabs.find((tab) => tab.id === tabId);
       if (!owningTab) return false;
-      const provider = registryRef.current.resolve(owningTab.providerId);
+      const provider = resolveProvider(owningTab.providerId);
       const lifecycle = lifecycleRef.current;
       if (!lifecycle.beginTurn(tabId)) return false;
       delete visibleProviderErrorsRef.current[tabId];
@@ -1085,7 +1091,7 @@ export function useSessionManager(options: SessionManagerOptions) {
       ...prev,
       tabs: prev.tabs.map((tab) => {
         if (tab.id !== tabId) return tab;
-        const provider = registryRef.current.resolve(tab.providerId);
+        const provider = resolveProvider(tab.providerId);
         return {
           ...tab,
           ...updates,
@@ -1177,7 +1183,7 @@ export function useSessionManager(options: SessionManagerOptions) {
       defaultProviderId;
     const providerId = requestedProviderId ?? activeProviderId;
     if (providerId !== activeProviderId) return;
-    const provider = registryRef.current.resolve(providerId);
+    const provider = resolveProvider(providerId);
     const request = ++historyRequestRef.current;
     try {
       const sessions = await provider.listSessions(options.cwd);
@@ -1187,12 +1193,12 @@ export function useSessionManager(options: SessionManagerOptions) {
       if (
         request !== historyRequestRef.current ||
         currentActiveProviderId !== providerId ||
-        providersRef.current.get(providerId) !== provider
+        latestProvidersRef.current.get(providerId) !== provider
       ) return;
       if (sessions.length === 0 && pastSessionsRef.current.length === 0) return;
       setPastSessions(sessions.map((session) => ({ ...session, providerId })));
     } catch (e) {
-      if (mountedRef.current && providersRef.current.get(providerId) === provider) {
+      if (mountedRef.current && latestProvidersRef.current.get(providerId) === provider) {
         console.error("[hyo] Failed to list past sessions:", e);
       }
     }
@@ -1217,7 +1223,7 @@ export function useSessionManager(options: SessionManagerOptions) {
       return;
     }
 
-    const provider = registryRef.current.resolve(pastSession.providerId);
+    const provider = resolveProvider(pastSession.providerId);
     const providerOpenings = openingSessionsRef.current.get(provider) ?? new Set<string>();
     openingSessionsRef.current.set(provider, providerOpenings);
     const openingKey = `${pastSession.providerId}\u0000${pastSession.id}`;
@@ -1241,7 +1247,7 @@ export function useSessionManager(options: SessionManagerOptions) {
       (tab) => tab.id === stateRef.current.activeTabId,
     )?.providerId;
     if (
-      providersRef.current.get(pastSession.providerId) !== provider ||
+      latestProvidersRef.current.get(pastSession.providerId) !== provider ||
       activeProviderId !== activeProviderIdAtStart ||
       defaultProviderIdRef.current !== defaultProviderIdAtStart
     ) return;
@@ -1310,7 +1316,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         };
       }
 
-      const provider = registryRef.current.resolve(tab.providerId);
+      const provider = resolveProvider(tab.providerId);
       const result = await provider.recoverSession(
         options.cwd,
         tab.providerSessionId,
