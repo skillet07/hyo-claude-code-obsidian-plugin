@@ -60,6 +60,50 @@ describe("CodexServerRequestBroker", () => {
     await expect(numeric).resolves.toEqual({ decision: "accept" });
   });
 
+  it("rolls back maps and auto-resolution timer when UI delivery throws", async () => {
+    vi.useFakeTimers();
+    const broker = new CodexServerRequestBroker(() => {
+      throw new Error("UI unavailable");
+    });
+
+    const pending = broker.handle({
+      method: "item/tool/requestUserInput",
+      id: "throwing-question",
+      params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "question-item",
+        autoResolutionMs: 100,
+        questions: [{ id: "q", header: "Q", question: "Answer?", isOther: false, isSecret: false, options: null }],
+      },
+    });
+
+    await expect(pending).rejects.toThrow("UI unavailable");
+    expect(broker.pendingCount).toBe(0);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(broker.pendingCount).toBe(0);
+    expect(broker.respondQuestion(uiRequestId("throwing-question"), { q: "late" })).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("rejects a duplicate typed request id before emitting another prompt", async () => {
+    const { broker, events } = createBroker();
+    const first = broker.handle({ ...commandRequest, id: 7 });
+
+    const duplicate = broker.handle({
+      method: "item/fileChange/requestApproval",
+      id: 7,
+      params: {
+        threadId: "thread-2", turnId: "turn-2", itemId: "file-2",
+        startedAtMs: 2, reason: null, grantRoot: null,
+      },
+    });
+
+    await expect(duplicate).rejects.toThrow("Duplicate Codex server request id: number:7");
+    expect(events).toHaveLength(1);
+    expect(broker.pendingCount).toBe(1);
+    broker.respondApproval(uiRequestId(7), { decision: "cancel" });
+    await expect(first).resolves.toEqual({ decision: "cancel" });
+  });
+
   it("emits command approval context and waits for the future runtime response", async () => {
     const { broker, events } = createBroker();
     const pending = broker.handle(commandRequest);

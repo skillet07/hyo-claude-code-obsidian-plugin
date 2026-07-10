@@ -52,6 +52,8 @@ export type ProviderToolKind =
   | "dynamic_tool_call"
   | "web_search"
   | "image_view"
+  | "sleep"
+  | "image_generation"
   | "unknown";
 
 export interface ProviderToolActivity {
@@ -88,6 +90,12 @@ export type ProviderEvent =
       blocks: ProviderContentBlock[];
     }
   | { type: "text_delta"; delta: string; itemId?: string }
+  | {
+      type: "agent_message_completed";
+      itemId: string;
+      text: string;
+      replaceExisting: true;
+    }
   | {
       type: "thinking_delta";
       delta: string;
@@ -126,6 +134,20 @@ export type ProviderEvent =
       newThreadIds: string[];
       prompt: string | null;
       agents: Record<string, { status: string; message: string | null }>;
+    }
+  | {
+      type: "subagent_status";
+      phase: "started" | "completed";
+      id: string;
+      activity: "started" | "interacted" | "interrupted";
+      agentThreadId: string;
+      agentPath: string;
+    }
+  | {
+      type: "review_mode_changed";
+      itemId: string;
+      active: boolean;
+      review: string;
     }
   | { type: "tool_started"; tool: Omit<ToolCallData, "result"> }
   | { type: "tool_input_delta"; delta: string }

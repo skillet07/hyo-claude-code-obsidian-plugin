@@ -35,6 +35,7 @@ export interface OrderedBlock {
   toolId?: string;
   turnIndex: number;
   isSkillOutput?: boolean;
+  providerItemId?: string;
 }
 
 export interface PermissionRequestData {

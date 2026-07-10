@@ -20,7 +20,13 @@ type ItemLifecycleParams = {
 
 type UnknownItem = { type: string; id?: string } & Record<string, unknown>;
 
+export interface CodexEventNormalizerOptions {
+  onUnknownNotification?: (diagnostic: { method: string }) => void;
+}
+
 export class CodexEventNormalizer {
+  constructor(private readonly options: CodexEventNormalizerOptions = {}) {}
+
   normalize(notification: BoundaryNotification): ProviderEvent[] {
     const params = notification.params as Record<string, any> | undefined;
     switch (notification.method) {
@@ -110,6 +116,7 @@ export class CodexEventNormalizer {
           details: params?.error?.additionalDetails ?? null,
         }];
       default:
+        this.options.onUnknownNotification?.({ method: notification.method });
         return [];
     }
   }
@@ -122,11 +129,15 @@ export class CodexEventNormalizer {
     // item discriminator can still receive the provider-neutral fallback card.
     const item = params.item as any;
     switch (item.type) {
+      case "userMessage":
+      case "hookPrompt":
+        return [];
       case "agentMessage":
         return phase === "completed" ? [{
-          type: "content_blocks",
-          source: "assistant",
-          blocks: [{ type: "text", text: item.text }],
+          type: "agent_message_completed",
+          itemId: item.id,
+          text: item.text,
+          replaceExisting: true,
         }] : [];
       case "reasoning":
         return phase === "completed" ? [{
@@ -225,24 +236,75 @@ export class CodexEventNormalizer {
           phase,
           tool: { id: item.id, kind: "image_view", name: "image view", input: { path: item.path } },
         }];
-      case "collabAgentToolCall":
-      case "collabToolCall":
-        return [normalizeCollab(phase, item as Extract<ThreadItem, { type: "collabAgentToolCall" }> | ForwardCollabItem)];
-      case "contextCompaction":
-        return phase === "completed" ? [{ type: "compaction_boundary" }] : [];
-      default:
+      case "sleep":
         return [{
           type: "tool_activity",
           phase,
           tool: {
-            id: typeof item.id === "string" ? item.id : `${item.type}-unknown`,
-            kind: "unknown",
-            name: item.type,
-            metadata: { itemType: item.type },
+            id: item.id,
+            kind: "sleep",
+            name: "sleep",
+            input: { durationMs: item.durationMs },
           },
         }];
+      case "imageGeneration":
+        return [{
+          type: "tool_activity",
+          phase,
+          tool: compactTool({
+            id: item.id,
+            kind: "image_generation",
+            name: "image generation",
+            status: normalizeStatus(item.status),
+            input: { revisedPrompt: item.revisedPrompt },
+            output: item.result,
+            metadata: item.savedPath === undefined ? {} : { savedPath: item.savedPath },
+          }),
+        }];
+      case "collabAgentToolCall":
+      case "collabToolCall":
+        return isCollabItem(item)
+          ? [normalizeCollab(phase, item)]
+          : [unknownItemEvent(phase, item)];
+      case "subAgentActivity":
+        return [{
+          type: "subagent_status",
+          phase,
+          id: item.id,
+          activity: item.kind,
+          agentThreadId: item.agentThreadId,
+          agentPath: item.agentPath,
+        }];
+      case "enteredReviewMode":
+      case "exitedReviewMode":
+        return [{
+          type: "review_mode_changed",
+          itemId: item.id,
+          active: item.type === "enteredReviewMode",
+          review: item.review,
+        }];
+      case "contextCompaction":
+        return phase === "completed" ? [{ type: "compaction_boundary" }] : [];
+      default:
+        return [unknownItemEvent(phase, item)];
     }
   }
+}
+
+function unknownItemEvent(
+  phase: "started" | "completed",
+  item: UnknownItem,
+): Extract<ProviderEvent, { type: "tool_activity" }> {
+  return {
+    type: "tool_activity",
+    phase,
+    tool: {
+      id: typeof item.id === "string" ? item.id : `${item.type}-unknown`,
+      kind: "unknown",
+      name: item.type,
+      metadata: { itemType: item.type },
+    },
+  };
 }
 
 function toolUpdate(
@@ -298,4 +360,44 @@ function normalizeCollab(
         ]),
     ),
   };
+}
+
+function isCollabItem(
+  item: unknown,
+): item is Extract<ThreadItem, { type: "collabAgentToolCall" }> | ForwardCollabItem {
+  if (!isRecord(item)) return false;
+  if (item.type !== "collabAgentToolCall" && item.type !== "collabToolCall") return false;
+  if (typeof item.id !== "string" || !COLLAB_TOOLS.has(String(item.tool))) return false;
+  if (!COLLAB_STATUSES.has(String(item.status))) return false;
+  if (typeof item.senderThreadId !== "string") return false;
+  if (!Array.isArray(item.receiverThreadIds) || !item.receiverThreadIds.every((id) => typeof id === "string")) {
+    return false;
+  }
+  if (item.prompt !== null && typeof item.prompt !== "string") return false;
+  if (item.model !== null && typeof item.model !== "string") return false;
+  if (item.reasoningEffort !== null && typeof item.reasoningEffort !== "string") return false;
+  if (!isRecord(item.agentsStates)) return false;
+  return Object.values(item.agentsStates).every((state) =>
+    state === undefined || (
+      isRecord(state) &&
+      COLLAB_AGENT_STATUSES.has(String(state.status)) &&
+      (state.message === null || typeof state.message === "string")
+    ),
+  );
+}
+
+const COLLAB_TOOLS = new Set(["spawnAgent", "sendInput", "resumeAgent", "wait", "closeAgent"]);
+const COLLAB_STATUSES = new Set(["inProgress", "completed", "failed"]);
+const COLLAB_AGENT_STATUSES = new Set([
+  "pendingInit",
+  "running",
+  "interrupted",
+  "completed",
+  "errored",
+  "shutdown",
+  "notFound",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

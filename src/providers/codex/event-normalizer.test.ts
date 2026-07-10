@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { ThreadItem } from "./generated/v2/ThreadItem";
 import { CodexEventNormalizer } from "./event-normalizer";
 
 const lifecycle = (phase: "started" | "completed", item: Record<string, unknown>) => ({
@@ -27,9 +28,10 @@ describe("CodexEventNormalizer", () => {
       phase: null,
       memoryCitation: null,
     }) as never)).toEqual([{
-      type: "content_blocks",
-      source: "assistant",
-      blocks: [{ type: "text", text: "Hi there" }],
+      type: "agent_message_completed",
+      itemId: "msg-1",
+      text: "Hi there",
+      replaceExisting: true,
     }]);
   });
 
@@ -235,6 +237,108 @@ describe("CodexEventNormalizer", () => {
       status: "in_progress",
       agents: { receiver: { status: "pending_init", message: null } },
     });
+  });
+
+  it("falls back safely when the forward collab alias is malformed", () => {
+    expect(normalizer.normalize(lifecycle("started", {
+      type: "collabToolCall", id: "bad-collab", tool: "spawnAgent",
+    }) as never)).toEqual([{
+      type: "tool_activity",
+      phase: "started",
+      tool: {
+        id: "bad-collab", kind: "unknown", name: "collabToolCall",
+        metadata: { itemType: "collabToolCall" },
+      },
+    }]);
+    expect(normalizer.normalize(lifecycle("completed", {
+      type: "collabToolCall", id: "changed-collab", tool: "wait", status: "completed",
+      senderThreadId: "sender", receiverThreadIds: ["receiver"], prompt: null,
+      model: null, reasoningEffort: null,
+      agentsStates: { receiver: { status: "futureStatus", message: null } },
+    }) as never)[0]).toMatchObject({
+      type: "tool_activity",
+      tool: { id: "changed-collab", kind: "unknown", name: "collabToolCall" },
+    });
+  });
+
+  it("explicitly handles every current generated ThreadItem discriminator", () => {
+    const item = <T extends ThreadItem>(value: T) => value;
+    const items = {
+      userMessage: item({ type: "userMessage", id: "user", clientId: null, content: [] }),
+      hookPrompt: item({ type: "hookPrompt", id: "hook", fragments: [] }),
+      agentMessage: item({ type: "agentMessage", id: "agent", text: "done", phase: null, memoryCitation: null }),
+      plan: item({ type: "plan", id: "plan", text: "plan" }),
+      reasoning: item({ type: "reasoning", id: "reason", summary: [], content: [] }),
+      commandExecution: item({
+        type: "commandExecution", id: "command", command: "pwd", cwd: "/vault",
+        processId: null, source: "agent", status: "completed", commandActions: [],
+        aggregatedOutput: null, exitCode: 0, durationMs: 1,
+      }),
+      fileChange: item({ type: "fileChange", id: "file", changes: [], status: "completed" }),
+      mcpToolCall: item({
+        type: "mcpToolCall", id: "mcp", server: "server", tool: "tool",
+        status: "completed", arguments: {}, appContext: null, pluginId: null,
+        result: null, error: null, durationMs: null,
+      }),
+      dynamicToolCall: item({
+        type: "dynamicToolCall", id: "dynamic", namespace: null, tool: "tool",
+        arguments: {}, status: "completed", contentItems: null, success: true,
+        durationMs: null,
+      }),
+      collabAgentToolCall: item({
+        type: "collabAgentToolCall", id: "collab", tool: "wait", status: "completed",
+        senderThreadId: "sender", receiverThreadIds: [], prompt: null, model: null,
+        reasoningEffort: null, agentsStates: {},
+      }),
+      subAgentActivity: item({
+        type: "subAgentActivity", id: "subagent", kind: "interacted",
+        agentThreadId: "agent-thread", agentPath: "root/agent",
+      }),
+      webSearch: item({ type: "webSearch", id: "web", query: "query", action: null }),
+      imageView: item({ type: "imageView", id: "image", path: "/tmp/image.png" }),
+      sleep: item({ type: "sleep", id: "sleep", durationMs: 100 }),
+      imageGeneration: item({
+        type: "imageGeneration", id: "generation", status: "completed",
+        revisedPrompt: "prompt", result: "image-result", savedPath: "/tmp/generated.png",
+      }),
+      enteredReviewMode: item({ type: "enteredReviewMode", id: "review-in", review: "review" }),
+      exitedReviewMode: item({ type: "exitedReviewMode", id: "review-out", review: "review" }),
+      contextCompaction: item({ type: "contextCompaction", id: "compact" }),
+    } satisfies { [K in ThreadItem["type"]]: Extract<ThreadItem, { type: K }> };
+
+    const expected = {
+      userMessage: "ignored", hookPrompt: "ignored",
+      agentMessage: "agent_message_completed", plan: "plan_updated",
+      reasoning: "reasoning_completed", commandExecution: "tool_activity",
+      fileChange: "tool_activity", mcpToolCall: "tool_activity",
+      dynamicToolCall: "tool_activity", collabAgentToolCall: "subagent_activity",
+      subAgentActivity: "subagent_status", webSearch: "tool_activity",
+      imageView: "tool_activity", sleep: "tool_activity",
+      imageGeneration: "tool_activity", enteredReviewMode: "review_mode_changed",
+      exitedReviewMode: "review_mode_changed", contextCompaction: "compaction_boundary",
+    } satisfies Record<ThreadItem["type"], string>;
+
+    for (const [kind, current] of Object.entries(items)) {
+      const events = normalizer.normalize(lifecycle("completed", current) as never);
+      if (expected[kind as ThreadItem["type"]] === "ignored") expect(events).toEqual([]);
+      else {
+        expect(events[0]?.type).toBe(expected[kind as ThreadItem["type"]]);
+        expect(events).not.toEqual(expect.arrayContaining([
+          expect.objectContaining({ type: "tool_activity", tool: { kind: "unknown" } }),
+        ]));
+      }
+    }
+  });
+
+  it("reports unknown notification methods without exposing their payload", () => {
+    const onUnknownNotification = vi.fn();
+    const diagnosticNormalizer = new CodexEventNormalizer({ onUnknownNotification });
+
+    expect(diagnosticNormalizer.normalize({
+      method: "future/notification",
+      params: { prompt: "sensitive", token: "secret" },
+    })).toEqual([]);
+    expect(onUnknownNotification).toHaveBeenCalledWith({ method: "future/notification" });
   });
 
   it("normalizes compaction, token usage, terminal turn states, warnings, and errors", () => {

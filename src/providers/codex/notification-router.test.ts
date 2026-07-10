@@ -80,4 +80,102 @@ describe("CodexNotificationRouter", () => {
     expect(second).not.toHaveBeenCalled();
     expect(router.getBufferedCount("thread-a", "turn-a")).toBe(0);
   });
+
+  it("retires a completed turn after a short grace and drops later notifications", async () => {
+    vi.useFakeTimers();
+    const router = new CodexNotificationRouter(undefined, { turnGraceMs: 10 });
+    const events: ProviderEvent[] = [];
+    router.registerRuntime({ runtimeId: "tab-a", threadId: "thread-a", onEvent: (event) => events.push(event) });
+    router.bindTurn("tab-a", "turn-a");
+
+    router.route({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-a",
+        turn: {
+          id: "turn-a", items: [], itemsView: { type: "full" }, status: "completed",
+          error: null, startedAt: 1, completedAt: 2, durationMs: 1,
+        },
+      },
+    } as never);
+    expect(router.getOwnedTurnCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(router.getOwnedTurnCount()).toBe(0);
+    const delivered = events.length;
+    router.route(delta("thread-a", "turn-a", "late-item", "late"));
+    expect(events).toHaveLength(delivered);
+    expect(router.getBufferedCount("thread-a", "turn-a")).toBe(0);
+    vi.useRealTimers();
+  });
+
+  it("retires a turn explicitly and clears its buffered state", () => {
+    const router = new CodexNotificationRouter();
+    router.registerRuntime({ runtimeId: "tab-a", threadId: "thread-a", onEvent: vi.fn() });
+    router.route(delta("thread-a", "turn-a", "early", "early"));
+    expect(router.getBufferedCount("thread-a", "turn-a")).toBe(1);
+
+    router.retireTurn("tab-a", "turn-a");
+
+    expect(router.getBufferedCount("thread-a", "turn-a")).toBe(0);
+    expect(router.getOwnedTurnCount()).toBe(0);
+    expect(router.getRetiredTurnCount()).toBe(1);
+    router.unregisterRuntime("tab-a");
+    expect(router.getRetiredTurnCount()).toBe(0);
+  });
+
+  it("evicts oldest pre-bind events at per-item and total caps", () => {
+    const perItemEvents: ProviderEvent[] = [];
+    const perItem = new CodexNotificationRouter(undefined, {
+      maxBufferedPerItem: 2,
+      maxBufferedTotal: 10,
+    });
+    perItem.registerRuntime({ runtimeId: "tab-a", threadId: "thread-a", onEvent: (event) => perItemEvents.push(event) });
+    perItem.route(delta("thread-a", "turn-a", "item", "one"));
+    perItem.route(delta("thread-a", "turn-a", "item", "two"));
+    perItem.route(delta("thread-a", "turn-a", "item", "three"));
+    perItem.bindTurn("tab-a", "turn-a");
+    expect(perItemEvents).toEqual([
+      { type: "text_delta", delta: "two", itemId: "item" },
+      { type: "text_delta", delta: "three", itemId: "item" },
+    ]);
+
+    const totalEvents: ProviderEvent[] = [];
+    const total = new CodexNotificationRouter(undefined, {
+      maxBufferedPerItem: 10,
+      maxBufferedTotal: 3,
+    });
+    total.registerRuntime({ runtimeId: "tab-b", threadId: "thread-b", onEvent: (event) => totalEvents.push(event) });
+    for (const id of ["one", "two", "three", "four"]) {
+      total.route(delta("thread-b", "turn-b", id, id));
+    }
+    total.bindTurn("tab-b", "turn-b");
+    expect(totalEvents.map((event) => event.type === "text_delta" ? event.delta : null))
+      .toEqual(["two", "three", "four"]);
+  });
+
+  it("expires orphan buffers using the injected clock and timer", () => {
+    let now = 0;
+    let expire: (() => void) | undefined;
+    const router = new CodexNotificationRouter(undefined, {
+      bufferTtlMs: 100,
+      now: () => now,
+      setTimer: (callback) => {
+        expire = callback;
+        return 1;
+      },
+      clearTimer: () => undefined,
+    });
+    const events = vi.fn();
+    router.registerRuntime({ runtimeId: "tab-a", threadId: "thread-a", onEvent: events });
+    router.route(delta("thread-a", "turn-a", "item", "secret output"));
+    expect(router.getBufferedCount("thread-a", "turn-a")).toBe(1);
+
+    now = 101;
+    expire?.();
+    router.bindTurn("tab-a", "turn-a");
+
+    expect(router.getBufferedCount("thread-a", "turn-a")).toBe(0);
+    expect(events).not.toHaveBeenCalled();
+  });
 });

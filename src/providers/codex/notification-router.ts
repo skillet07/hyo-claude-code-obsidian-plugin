@@ -14,17 +14,55 @@ interface BufferedEvents {
   turnId: string;
   itemId: string;
   events: ProviderEvent[];
+  expiresAt: number;
+  retireAfterDelivery: boolean;
 }
 
 type BoundaryNotification = ServerNotification | { method: string; params?: unknown };
+
+export const CODEX_ROUTER_DEFAULTS = {
+  maxBufferedPerItem: 64,
+  maxBufferedTotal: 1024,
+  bufferTtlMs: 30_000,
+  turnGraceMs: 250,
+  retiredTurnTtlMs: 30_000,
+} as const;
+
+export interface CodexNotificationRouterOptions {
+  maxBufferedPerItem?: number;
+  maxBufferedTotal?: number;
+  bufferTtlMs?: number;
+  turnGraceMs?: number;
+  retiredTurnTtlMs?: number;
+  now?: () => number;
+  setTimer?: (callback: () => void, delayMs: number) => unknown;
+  clearTimer?: (timer: unknown) => void;
+}
 
 export class CodexNotificationRouter {
   private readonly runtimes = new Map<string, CodexRuntimeRegistration>();
   private readonly turnOwners = new Map<string, string>();
   private readonly bufferedByItem = new Map<string, BufferedEvents[]>();
+  private readonly retiredTurns = new Map<string, number>();
+  private readonly retirementTimers = new Map<string, unknown>();
+  private readonly tombstoneTimers = new Map<string, unknown>();
+  private readonly options: Required<CodexNotificationRouterOptions>;
+  private bufferedTotal = 0;
+  private expiryTimer: unknown;
   private sequence = 0;
 
-  constructor(private readonly normalizer = new CodexEventNormalizer()) {}
+  constructor(
+    private readonly normalizer = new CodexEventNormalizer(),
+    options: CodexNotificationRouterOptions = {},
+  ) {
+    this.options = {
+      ...CODEX_ROUTER_DEFAULTS,
+      now: () => Date.now(),
+      setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+      clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+      ...options,
+    };
+  }
 
   registerRuntime(registration: CodexRuntimeRegistration): void {
     this.unregisterRuntime(registration.runtimeId);
@@ -35,13 +73,19 @@ export class CodexNotificationRouter {
     const runtime = this.runtimes.get(runtimeId);
     this.runtimes.delete(runtimeId);
     for (const [key, owner] of this.turnOwners) {
-      if (owner === runtimeId) this.turnOwners.delete(key);
+      if (owner === runtimeId) {
+        this.turnOwners.delete(key);
+        this.cancelRetirement(key);
+      }
     }
     if (runtime && ![...this.runtimes.values()].some((candidate) => candidate.threadId === runtime.threadId)) {
-      for (const [key, queue] of this.bufferedByItem) {
-        const keep = queue.filter((entry) => entry.threadId !== runtime.threadId);
-        if (keep.length === 0) this.bufferedByItem.delete(key);
-        else this.bufferedByItem.set(key, keep);
+      this.dropBuffers((entry) => entry.threadId === runtime.threadId);
+      const prefix = `${runtime.threadId}\u0000`;
+      for (const key of [...this.retiredTurns.keys()]) {
+        if (key.startsWith(prefix)) this.clearRetiredTurn(key);
+      }
+      for (const key of [...this.retirementTimers.keys()]) {
+        if (key.startsWith(prefix)) this.cancelRetirement(key);
       }
     }
   }
@@ -50,6 +94,7 @@ export class CodexNotificationRouter {
     const runtime = this.runtimes.get(runtimeId);
     if (!runtime) throw new Error(`Unknown Codex runtime: ${runtimeId}`);
     const turnKey = makeTurnKey(runtime.threadId, turnId);
+    this.clearRetiredTurn(turnKey);
     const existingOwner = this.turnOwners.get(turnKey);
     if (existingOwner && existingOwner !== runtimeId) {
       throw new Error(`Codex turn ${turnId} in thread ${runtime.threadId} is already bound`);
@@ -58,7 +103,23 @@ export class CodexNotificationRouter {
     this.flush(runtime, turnId);
   }
 
+  retireTurn(runtimeId: string, turnId: string): boolean {
+    const runtime = this.runtimes.get(runtimeId);
+    if (!runtime) return false;
+    this.retireTurnKey(makeTurnKey(runtime.threadId, turnId));
+    return true;
+  }
+
+  getOwnedTurnCount(): number {
+    return this.turnOwners.size;
+  }
+
+  getRetiredTurnCount(): number {
+    return this.retiredTurns.size;
+  }
+
   route(notification: BoundaryNotification): void {
+    this.pruneExpiredBuffers();
     const events = this.normalizer.normalize(notification);
     if (events.length === 0) return;
     const identity = getIdentity(notification.params);
@@ -75,10 +136,16 @@ export class CodexNotificationRouter {
       return;
     }
 
-    const ownerId = this.turnOwners.get(makeTurnKey(identity.threadId, identity.turnId));
+    const turnKey = makeTurnKey(identity.threadId, identity.turnId);
+    if (this.retiredTurns.has(turnKey)) return;
+
+    const ownerId = this.turnOwners.get(turnKey);
     const owner = ownerId ? this.runtimes.get(ownerId) : undefined;
     if (owner) {
       this.emit(owner, events);
+      if (notification.method === "turn/completed") {
+        this.scheduleRetirement(turnKey);
+      }
       return;
     }
 
@@ -86,13 +153,17 @@ export class CodexNotificationRouter {
       return;
     }
 
-    const itemKey = makeItemKey(identity.threadId, identity.turnId, identity.itemId);
-    const queue = this.bufferedByItem.get(itemKey) ?? [];
-    queue.push({ sequence: this.sequence++, ...identity, events });
-    this.bufferedByItem.set(itemKey, queue);
+    this.buffer({
+      sequence: this.sequence++,
+      ...identity,
+      events,
+      expiresAt: this.options.now() + this.options.bufferTtlMs,
+      retireAfterDelivery: notification.method === "turn/completed",
+    });
   }
 
   getBufferedCount(threadId: string, turnId: string): number {
+    this.pruneExpiredBuffers();
     let count = 0;
     for (const queue of this.bufferedByItem.values()) {
       count += queue.filter((entry) => entry.threadId === threadId && entry.turnId === turnId).length;
@@ -100,23 +171,145 @@ export class CodexNotificationRouter {
     return count;
   }
 
+  dispose(): void {
+    if (this.expiryTimer !== undefined) this.options.clearTimer(this.expiryTimer);
+    for (const timer of this.retirementTimers.values()) this.options.clearTimer(timer);
+    for (const timer of this.tombstoneTimers.values()) this.options.clearTimer(timer);
+    this.expiryTimer = undefined;
+    this.retirementTimers.clear();
+    this.tombstoneTimers.clear();
+    this.turnOwners.clear();
+    this.retiredTurns.clear();
+    this.bufferedByItem.clear();
+    this.bufferedTotal = 0;
+  }
+
   private flush(runtime: CodexRuntimeRegistration, turnId: string): void {
+    this.pruneExpiredBuffers();
     const pending: BufferedEvents[] = [];
     for (const [key, queue] of this.bufferedByItem) {
       const keep: BufferedEvents[] = [];
       for (const entry of queue) {
-        if (entry.threadId === runtime.threadId && entry.turnId === turnId) pending.push(entry);
+        if (entry.threadId === runtime.threadId && entry.turnId === turnId) {
+          pending.push(entry);
+          this.bufferedTotal--;
+        }
         else keep.push(entry);
       }
       if (keep.length === 0) this.bufferedByItem.delete(key);
       else this.bufferedByItem.set(key, keep);
     }
     pending.sort((left, right) => left.sequence - right.sequence);
-    for (const entry of pending) this.emit(runtime, entry.events);
+    const turnKey = makeTurnKey(runtime.threadId, turnId);
+    for (const entry of pending) {
+      this.emit(runtime, entry.events);
+      if (entry.retireAfterDelivery) this.scheduleRetirement(turnKey);
+    }
+    this.scheduleExpiry();
   }
 
   private emit(runtime: CodexRuntimeRegistration, events: ProviderEvent[]): void {
     for (const event of events) runtime.onEvent(event);
+  }
+
+  private buffer(entry: BufferedEvents): void {
+    if (this.options.maxBufferedPerItem <= 0 || this.options.maxBufferedTotal <= 0) return;
+    const itemKey = makeItemKey(entry.threadId, entry.turnId, entry.itemId);
+    const queue = this.bufferedByItem.get(itemKey) ?? [];
+    while (queue.length >= this.options.maxBufferedPerItem) {
+      queue.shift();
+      this.bufferedTotal--;
+    }
+    while (this.bufferedTotal >= this.options.maxBufferedTotal) this.evictOldestBuffer();
+    queue.push(entry);
+    this.bufferedTotal++;
+    this.bufferedByItem.set(itemKey, queue);
+    this.scheduleExpiry();
+  }
+
+  private evictOldestBuffer(): void {
+    let oldestKey: string | undefined;
+    let oldestSequence = Number.POSITIVE_INFINITY;
+    for (const [key, queue] of this.bufferedByItem) {
+      if (queue[0] && queue[0].sequence < oldestSequence) {
+        oldestKey = key;
+        oldestSequence = queue[0].sequence;
+      }
+    }
+    if (!oldestKey) return;
+    const queue = this.bufferedByItem.get(oldestKey)!;
+    queue.shift();
+    this.bufferedTotal--;
+    if (queue.length === 0) this.bufferedByItem.delete(oldestKey);
+  }
+
+  private pruneExpiredBuffers(): void {
+    const now = this.options.now();
+    this.dropBuffers((entry) => entry.expiresAt <= now);
+  }
+
+  private dropBuffers(predicate: (entry: BufferedEvents) => boolean): void {
+    for (const [key, queue] of this.bufferedByItem) {
+      const keep = queue.filter((entry) => {
+        if (!predicate(entry)) return true;
+        this.bufferedTotal--;
+        return false;
+      });
+      if (keep.length === 0) this.bufferedByItem.delete(key);
+      else this.bufferedByItem.set(key, keep);
+    }
+    this.scheduleExpiry();
+  }
+
+  private scheduleExpiry(): void {
+    if (this.expiryTimer !== undefined) {
+      this.options.clearTimer(this.expiryTimer);
+      this.expiryTimer = undefined;
+    }
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const queue of this.bufferedByItem.values()) {
+      for (const entry of queue) nearest = Math.min(nearest, entry.expiresAt);
+    }
+    if (!Number.isFinite(nearest)) return;
+    this.expiryTimer = this.options.setTimer(() => {
+      this.expiryTimer = undefined;
+      this.pruneExpiredBuffers();
+    }, Math.max(0, nearest - this.options.now()));
+  }
+
+  private scheduleRetirement(turnKey: string): void {
+    this.cancelRetirement(turnKey);
+    const timer = this.options.setTimer(() => {
+      this.retirementTimers.delete(turnKey);
+      this.retireTurnKey(turnKey);
+    }, this.options.turnGraceMs);
+    this.retirementTimers.set(turnKey, timer);
+  }
+
+  private retireTurnKey(turnKey: string): void {
+    this.cancelRetirement(turnKey);
+    this.turnOwners.delete(turnKey);
+    const [threadId, turnId] = splitTurnKey(turnKey);
+    this.dropBuffers((entry) => entry.threadId === threadId && entry.turnId === turnId);
+    this.retiredTurns.set(turnKey, this.options.now() + this.options.retiredTurnTtlMs);
+    const timer = this.options.setTimer(() => {
+      this.tombstoneTimers.delete(turnKey);
+      this.retiredTurns.delete(turnKey);
+    }, this.options.retiredTurnTtlMs);
+    this.tombstoneTimers.set(turnKey, timer);
+  }
+
+  private cancelRetirement(turnKey: string): void {
+    const timer = this.retirementTimers.get(turnKey);
+    if (timer !== undefined) this.options.clearTimer(timer);
+    this.retirementTimers.delete(turnKey);
+  }
+
+  private clearRetiredTurn(turnKey: string): void {
+    this.retiredTurns.delete(turnKey);
+    const timer = this.tombstoneTimers.get(turnKey);
+    if (timer !== undefined) this.options.clearTimer(timer);
+    this.tombstoneTimers.delete(turnKey);
   }
 }
 
@@ -145,6 +338,11 @@ function makeTurnKey(threadId: string, turnId: string): string {
 
 function makeItemKey(threadId: string, turnId: string, itemId: string): string {
   return `${makeTurnKey(threadId, turnId)}\u0000${itemId}`;
+}
+
+function splitTurnKey(turnKey: string): [string, string] {
+  const separator = turnKey.indexOf("\u0000");
+  return [turnKey.slice(0, separator), turnKey.slice(separator + 1)];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

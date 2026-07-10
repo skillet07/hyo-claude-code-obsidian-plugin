@@ -15,6 +15,10 @@ import type {
   ProviderSessionSummary,
 } from "../providers/types";
 import {
+  applyAgentMessageCompletion,
+  applyProviderTextDelta,
+} from "../providers/event-reducer";
+import {
   SessionLifecycle,
   type RuntimeLease,
 } from "./session-lifecycle";
@@ -507,6 +511,17 @@ export function useSessionManager(options: SessionManagerOptions) {
         return;
       }
 
+      if (event.type === "agent_message_completed") {
+        applyAgentMessageCompletion(
+          ss.orderedBlocks,
+          ss.turnIndex,
+          event.itemId,
+          event.text,
+        );
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
       if (event.type === "tool_started") {
         const tool: ToolCallData = { ...event.tool, result: null };
         if (!ss.toolCalls.find((item) => item.id === tool.id)) {
@@ -551,17 +566,12 @@ export function useSessionManager(options: SessionManagerOptions) {
         if (ss.toolResultSinceLastText && ss.orderedBlocks.length > 0) {
           ss.turnIndex++;
         }
-        const existing = ss.orderedBlocks.find(
-          (block) => block.type === "text" && block.turnIndex === ss.turnIndex,
+        applyProviderTextDelta(
+          ss.orderedBlocks,
+          ss.turnIndex,
+          event.itemId,
+          event.delta,
         );
-        if (existing) existing.content = (existing.content || "") + event.delta;
-        else {
-          ss.orderedBlocks.push({
-            type: "text",
-            content: event.delta,
-            turnIndex: ss.turnIndex,
-          });
-        }
         ss.toolResultSinceLastText = false;
         updateTabLastAssistant(tabId, () => buildSnapshot(ss));
         return;

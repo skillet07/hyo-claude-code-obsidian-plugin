@@ -23,6 +23,7 @@ interface PendingRequest {
   threadId: string;
   uiRequestId: string;
   resolve: (response: unknown) => void;
+  reject: (error: Error) => void;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -149,8 +150,7 @@ export class CodexServerRequestBroker {
       availableDecisions.push("apply_network_policy_amendment");
     }
     availableDecisions.push("deny", "cancel");
-    const promise = this.createPending(request.id, "command", params.threadId);
-    this.onEvent({
+    return this.createPending(request.id, "command", params.threadId, {
       type: "approval_requested",
       requestId: toUiRequestId(request.id),
       toolName: "command",
@@ -173,15 +173,13 @@ export class CodexServerRequestBroker {
         networkPolicy: params.proposedNetworkPolicyAmendments ?? null,
       },
     });
-    return promise;
   }
 
   private handleFileChange(
     request: Extract<ServerRequest, { method: "item/fileChange/requestApproval" }>,
   ): Promise<unknown> {
     const { params } = request;
-    const promise = this.createPending(request.id, "file", params.threadId);
-    this.onEvent({
+    return this.createPending(request.id, "file", params.threadId, {
       type: "approval_requested",
       requestId: toUiRequestId(request.id),
       toolName: "file change",
@@ -193,15 +191,13 @@ export class CodexServerRequestBroker {
       input: { grantRoot: params.grantRoot ?? null },
       availableDecisions: ["allow", "allow_session", "deny", "cancel"],
     });
-    return promise;
   }
 
   private handlePermissions(
     request: Extract<ServerRequest, { method: "item/permissions/requestApproval" }>,
   ): Promise<unknown> {
     const { params } = request;
-    const promise = this.createPending(request.id, "permissions", params.threadId);
-    this.onEvent({
+    return this.createPending(request.id, "permissions", params.threadId, {
       type: "approval_requested",
       requestId: toUiRequestId(request.id),
       toolName: "permissions",
@@ -218,19 +214,12 @@ export class CodexServerRequestBroker {
       availableDecisions: ["allow"],
       grantScopes: ["turn", "session"],
     });
-    return promise;
   }
 
   private handleQuestion(
     request: Extract<ServerRequest, { method: "item/tool/requestUserInput" }>,
   ): Promise<unknown> {
     const { params } = request;
-    const promise = this.createPending(
-      request.id,
-      "question",
-      params.threadId,
-      params.autoResolutionMs,
-    );
     const questions: ProviderQuestion[] = params.questions.map((question) => ({
       id: question.id,
       header: question.header,
@@ -239,7 +228,7 @@ export class CodexServerRequestBroker {
       isSecret: question.isSecret,
       ...(question.options == null ? {} : { options: question.options }),
     }));
-    this.onEvent({
+    return this.createPending(request.id, "question", params.threadId, {
       type: "question_requested",
       requestId: toUiRequestId(request.id),
       threadId: params.threadId,
@@ -247,31 +236,39 @@ export class CodexServerRequestBroker {
       itemId: params.itemId,
       autoResolutionMs: params.autoResolutionMs,
       questions,
-    });
-    return promise;
+    }, params.autoResolutionMs);
   }
 
   private createPending(
     requestId: RequestId,
     kind: PendingKind,
     threadId: string,
+    event: ProviderEvent,
     autoResolutionMs: number | null = null,
   ): Promise<unknown> {
     const uiRequestId = toUiRequestId(requestId);
     if (this.pending.has(requestId)) {
       return Promise.reject(new Error(`Duplicate Codex server request id: ${uiRequestId}`));
     }
-    return new Promise((resolve) => {
-      const pending: PendingRequest = { kind, threadId, uiRequestId, resolve };
-      if (autoResolutionMs != null) {
-        pending.timer = setTimeout(() => {
-          const active = this.pending.get(requestId);
-          if (active === pending) this.finish(requestId, pending, null, "auto");
-        }, autoResolutionMs);
-      }
-      this.pending.set(requestId, pending);
-      this.requestIdsByUiKey.set(uiRequestId, requestId);
+    let pending!: PendingRequest;
+    const promise = new Promise<unknown>((resolve, reject) => {
+      pending = { kind, threadId, uiRequestId, resolve, reject };
     });
+    if (autoResolutionMs != null) {
+      pending.timer = setTimeout(() => {
+        const active = this.pending.get(requestId);
+        if (active === pending) this.finish(requestId, pending, null, "auto");
+      }, autoResolutionMs);
+    }
+    this.pending.set(requestId, pending);
+    this.requestIdsByUiKey.set(uiRequestId, requestId);
+    try {
+      this.onEvent(event);
+    } catch (error) {
+      this.rollback(requestId, pending);
+      pending.reject(asError(error));
+    }
+    return promise;
   }
 
   private take(uiRequestId: string, kinds: PendingKind[]): PendingRequest | undefined {
@@ -297,10 +294,22 @@ export class CodexServerRequestBroker {
     pending.resolve(response);
     this.onEvent({ type: "request_resolved", requestId: pending.uiRequestId, reason });
   }
+
+  private rollback(requestId: RequestId, pending: PendingRequest): void {
+    if (this.pending.get(requestId) === pending) this.pending.delete(requestId);
+    if (this.requestIdsByUiKey.get(pending.uiRequestId) === requestId) {
+      this.requestIdsByUiKey.delete(pending.uiRequestId);
+    }
+    if (pending.timer) clearTimeout(pending.timer);
+  }
 }
 
 function toUiRequestId(requestId: RequestId): string {
   return `${typeof requestId}:${String(requestId)}`;
+}
+
+function asError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
 }
 
 function mapCommandResponse(
