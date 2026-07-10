@@ -47,6 +47,13 @@ export function HyoApp({ app, plugin }: HyoAppProps) {
     () => [claudeProvider, codexProvider],
     [claudeProvider, codexProvider],
   );
+  const providerDefaults = useMemo(
+    () => ({
+      claude: { model: plugin.settings.model },
+      codex: { model: "" },
+    }),
+    [plugin.settings.model],
+  );
 
   const sessionManager = useSessionManager({
     cliPath: plugin.settings.cliPath,
@@ -59,6 +66,7 @@ export function HyoApp({ app, plugin }: HyoAppProps) {
     settingsVersion,
     providers,
     defaultProviderId: "claude",
+    providerDefaults,
   });
 
   if (cliFound === null) {

@@ -1179,7 +1179,7 @@ function splitTurnKey(key: string): [string, string] {
 function threadConfiguration(options: ProviderRuntimeOptions): Omit<ThreadStartParams, "threadId"> {
   return {
     cwd: options.cwd,
-    model: options.model,
+    ...(options.model.trim() ? { model: options.model } : {}),
     approvalPolicy: options.approvalPolicy ?? mapApprovalPolicy(options.permissionMode),
     sandbox: options.sandboxMode ?? mapSandbox(options.permissionMode),
   };

@@ -8,6 +8,7 @@ import type {
   ProviderId,
   ProviderRuntime,
   ProviderRuntimeOptions,
+  ProviderSessionOptions,
   ProviderSessionSummary,
 } from "../providers/types";
 
@@ -135,7 +136,7 @@ class FakeProvider implements ChatProvider {
     return this.sessions;
   }
 
-  async loadSession() {
+  async loadSession(_cwd: string, _sessionId: string) {
     return this.history;
   }
 
@@ -161,9 +162,10 @@ interface HarnessProps {
   cliPath: string;
   providers?: ChatProvider[];
   defaultProviderId?: ProviderId;
+  providerDefaults?: Partial<Record<ProviderId, Partial<ProviderSessionOptions>>>;
 }
 
-function Harness({ cliPath, providers, defaultProviderId }: HarnessProps) {
+function Harness({ cliPath, providers, defaultProviderId, providerDefaults }: HarnessProps) {
   manager = useSessionManager({
     cliPath,
     cwd: "/tmp/vault",
@@ -172,6 +174,7 @@ function Harness({ cliPath, providers, defaultProviderId }: HarnessProps) {
     defaultAgent: "",
     providers,
     defaultProviderId,
+    providerDefaults,
   });
   return null;
 }
@@ -711,6 +714,57 @@ describe("useSessionManager lifecycle integration", () => {
     });
   });
 
+  it("uses provider-scoped Codex defaults for new and reopened tabs", async () => {
+    const claude = new FakeProvider("claude");
+    const codex = new FakeProvider("codex");
+    const providerDefaults = {
+      claude: { model: "claude-sonnet" },
+      codex: { model: "", reasoningEffort: "high" },
+    } satisfies Partial<Record<ProviderId, Partial<ProviderSessionOptions>>>;
+    const providers = [claude, codex];
+    await mount("unused", {
+      providers,
+      defaultProviderId: "claude",
+      providerDefaults,
+    });
+    expect(manager.activeModel).toBe("claude-sonnet");
+    await act(async () => {
+      renderer?.update(React.createElement(Harness, {
+        cliPath: "unused",
+        providers,
+        defaultProviderId: "codex",
+        providerDefaults,
+      }));
+    });
+    await act(async () => { manager.newTab(); });
+
+    expect(manager.activeModel).toBe("");
+    act(() => manager.sendMessage("new Codex tab"));
+    expect(codex.runtimeOptions[0]).toMatchObject({
+      model: "",
+      reasoningEffort: "high",
+    });
+    expect(codex.runtimeOptions[0]?.model).not.toBe("sonnet");
+    act(() => codex.runtimes[0]?.emit({ type: "turn_completed" }));
+
+    const past: ProviderSessionSummary = {
+      providerId: "codex",
+      id: "codex-past",
+      title: "Codex past",
+      date: new Date(),
+    };
+    await act(async () => manager.openPastSession(past));
+    expect(manager.activeModel).toBe("");
+    act(() => manager.sendMessage("resume Codex tab"));
+    expect(codex.runtimeOptions[1]).toMatchObject({
+      model: "",
+      reasoningEffort: "high",
+      providerSessionId: "codex-past",
+      resume: true,
+    });
+    expect(codex.runtimeOptions[1]?.model).not.toBe("sonnet");
+  });
+
   it("scopes history list, open, rename, and dedupe by provider", async () => {
     const sameDate = new Date("2026-07-10T00:00:00Z");
     const claude = new FakeProvider("claude");
@@ -785,6 +839,65 @@ describe("useSessionManager lifecycle integration", () => {
     expect(manager.tabs.some((tab) => tab.providerSessionId === "stale-active")).toBe(false);
   });
 
+  it("keeps only the latest history-open intent when loads resolve in reverse", async () => {
+    const provider = new FakeProvider("claude");
+    const first = deferred<ProviderHistoryMessage[]>();
+    const second = deferred<ProviderHistoryMessage[]>();
+    vi.spyOn(provider, "loadSession").mockImplementation((_cwd, sessionId) =>
+      sessionId === "first" ? first.promise : second.promise,
+    );
+    await mount("unused", { providers: [provider], defaultProviderId: "claude" });
+    const firstSession: ProviderSessionSummary = {
+      providerId: "claude", id: "first", title: "First", date: new Date(),
+    };
+    const secondSession: ProviderSessionSummary = {
+      providerId: "claude", id: "second", title: "Second", date: new Date(),
+    };
+    let firstOpen!: Promise<void>;
+    let secondOpen!: Promise<void>;
+    act(() => {
+      firstOpen = manager.openPastSession(firstSession);
+      secondOpen = manager.openPastSession(secondSession);
+    });
+
+    second.resolve([{ role: "assistant", content: "second wins" }]);
+    await act(async () => secondOpen);
+    first.resolve([{ role: "assistant", content: "first is stale" }]);
+    await act(async () => firstOpen);
+
+    expect(manager.tabs.some((tab) => tab.providerSessionId === "first")).toBe(false);
+    expect(manager.tabs.filter((tab) => tab.providerSessionId === "second")).toHaveLength(1);
+    expect(manager.activeMessages[0]?.content).toBe("second wins");
+  });
+
+  it("does not publish history list or open results after unmount", async () => {
+    const provider = new FakeProvider("claude");
+    const listPending = deferred<ProviderSessionSummary[]>();
+    const openPending = deferred<ProviderHistoryMessage[]>();
+    vi.spyOn(provider, "listSessions").mockImplementation(() => listPending.promise);
+    vi.spyOn(provider, "loadSession").mockImplementation(() => openPending.promise);
+    await mount("unused", { providers: [provider], defaultProviderId: "claude" });
+    const initialTabCount = manager.tabs.length;
+    let opening!: Promise<void>;
+    act(() => {
+      opening = manager.openPastSession({
+        providerId: "claude", id: "after-unmount", title: "Unmounted", date: new Date(),
+      });
+      renderer?.unmount();
+    });
+    renderer = null;
+
+    listPending.resolve([{
+      providerId: "claude", id: "listed-after-unmount", title: "Listed", date: new Date(),
+    }]);
+    openPending.resolve([{ role: "assistant", content: "opened after unmount" }]);
+    await opening;
+    await Promise.resolve();
+
+    expect(manager.tabs).toHaveLength(initialTabCount);
+    expect(manager.tabs.some((tab) => tab.providerSessionId === "after-unmount")).toBe(false);
+  });
+
   it("replaces and finalizes only runtimes owned by the replaced provider", async () => {
     const claudeA = new FakeProvider("claude");
     const claudeB = new FakeProvider("claude");
@@ -814,6 +927,38 @@ describe("useSessionManager lifecycle integration", () => {
     expect(codex.cleanupCalls).toBe(0);
     expect(manager.tabs.find((tab) => tab.id === claudeTabId)?.generating).toBe(false);
     expect(manager.tabs.find((tab) => tab.id === codexTabId)?.generating).toBe(true);
+  });
+
+  it("retains a removed provider until its surviving tab is closed", async () => {
+    const claude = new FakeProvider("claude");
+    const codex = new FakeProvider("codex");
+    const providerDefaults = {
+      claude: { model: "claude-sonnet" },
+      codex: { model: "" },
+    } satisfies Partial<Record<ProviderId, Partial<ProviderSessionOptions>>>;
+    await mount("unused", {
+      providers: [claude, codex], defaultProviderId: "claude", providerDefaults,
+    });
+    const claudeTabId = manager.activeTabId;
+
+    await act(async () => {
+      renderer?.update(React.createElement(Harness, {
+        cliPath: "unused",
+        providers: [codex],
+        defaultProviderId: "codex",
+        providerDefaults,
+      }));
+    });
+
+    expect(manager.activeProviderId).toBe("claude");
+    expect(claude.cleanupCalls).toBe(0);
+    act(() => manager.sendMessage("survives removal"));
+    expect(claude.runtimes[0]?.sent).toEqual(["survives removal"]);
+    act(() => manager.closeTab(claudeTabId));
+    expect(manager.tabs).toHaveLength(1);
+    expect(manager.tabs[0]?.providerId).toBe("codex");
+    expect(claude.cleanupCalls).toBe(1);
+    expect(codex.cleanupCalls).toBe(0);
   });
 
   it("updates active provider capabilities and preserves rich Codex tool cards", async () => {
@@ -889,5 +1034,36 @@ describe("useSessionManager lifecycle integration", () => {
     expect(claude.cleanupCalls).toBe(1);
     expect(codex.cleanupCalls).toBe(1);
     expect(codex.runtimes[0]?.cleanupCalls).toBe(1);
+  });
+
+  it("cancels delayed compaction continuation when the runtime is replaced", async () => {
+    const provider = new FakeProvider("claude");
+    await mount("unused", { providers: [provider], defaultProviderId: "claude" });
+    vi.useFakeTimers();
+    try {
+      act(() => manager.sendMessage("first"));
+      const retiredRuntime = provider.runtimes[0]!;
+      act(() => retiredRuntime.emit({ type: "compaction_boundary" }));
+      act(() => manager.stopGeneration());
+      act(() => manager.sendMessage("replacement"));
+      const replacementRuntime = provider.runtimes[1]!;
+
+      await act(async () => vi.advanceTimersByTimeAsync(100));
+
+      expect(retiredRuntime.sent).toEqual(["first"]);
+      expect(replacementRuntime.sent).toEqual(["replacement"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the owning provider name in unexpected-close messages", async () => {
+    const codex = new FakeProvider("codex");
+    await mount("unused", { providers: [codex], defaultProviderId: "codex" });
+    act(() => manager.sendMessage("close me"));
+    act(() => codex.runtimes[0]?.emit({ type: "closed", exitCode: 9 }));
+
+    expect(manager.activeMessages.at(-1)?.content).toContain("Codex");
+    expect(manager.activeMessages.at(-1)?.content).not.toContain("Claude");
   });
 });

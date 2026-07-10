@@ -286,6 +286,39 @@ describe("CodexProvider runtime lifecycle", () => {
     });
   });
 
+  it("omits a blank model from new, resumed, and turn requests", async () => {
+    const { provider, client } = createHarness();
+    const started = provider.createRuntime(runtimeOptions(() => undefined, {
+      model: "",
+    }));
+    const resumed = provider.createRuntime(runtimeOptions(() => undefined, {
+      model: "",
+      providerSessionId: "thread-existing",
+      resume: true,
+    }));
+
+    started.start();
+    resumed.start();
+    started.send("new thread");
+    resumed.send("resumed thread");
+    await vi.waitFor(() => expect(client.turnStart).toHaveBeenCalledTimes(2));
+
+    expect(client.threadStart).toHaveBeenCalledWith({
+      cwd: "/vault",
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+    });
+    expect(client.threadResume).toHaveBeenCalledWith({
+      threadId: "thread-existing",
+      cwd: "/vault",
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+    });
+    for (const [params] of (client.turnStart as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(params).not.toHaveProperty("model");
+    }
+  });
+
   it("buffers an early notification until turn/start returns and then flushes it", async () => {
     let handlers!: CodexConnectionHandlers;
     const turnStart = vi.fn(async ({ threadId }) => {

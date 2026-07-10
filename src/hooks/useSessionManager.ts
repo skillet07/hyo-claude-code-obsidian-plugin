@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import type {
   Message,
   ToolCallData,
@@ -75,6 +75,7 @@ export interface SessionManagerOptions {
   autoGenerateTitles?: boolean;
   providers?: ChatProvider[];
   defaultProviderId?: ProviderId;
+  providerDefaults?: Partial<Record<ProviderId, Partial<ProviderSessionOptions>>>;
 }
 
 // ------- utilities -------
@@ -84,6 +85,20 @@ function genId(): string {
     const r = (Math.random() * 16) | 0;
     return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
   });
+}
+
+function providerDefaultsFor(
+  options: SessionManagerOptions,
+  providerId: ProviderId,
+): ProviderSessionOptions {
+  const configured = options.providerDefaults?.[providerId];
+  return {
+    model: configured?.model ?? (providerId === "claude" ? options.model : ""),
+    reasoningEffort: configured?.reasoningEffort,
+    approvalPolicy: configured?.approvalPolicy,
+    sandboxMode: configured?.sandboxMode,
+    networkAccess: configured?.networkAccess,
+  };
 }
 
 function processContentBlocks(
@@ -213,9 +228,9 @@ export function useSessionManager(options: SessionManagerOptions) {
     [registry],
   );
   const defaultProviderId = options.defaultProviderId ?? "claude";
-  registry.resolve(defaultProviderId);
   const [state, setState] = useState<SessionState>(() => {
     const id = genId();
+    const providerDefaults = providerDefaultsFor(options, defaultProviderId);
     return {
       tabs: [
         {
@@ -226,7 +241,7 @@ export function useSessionManager(options: SessionManagerOptions) {
           title: "New conversation",
           messages: [],
           generating: false,
-          model: options.model,
+          ...providerDefaults,
           permissionMode: options.permissionMode,
           agent: options.defaultAgent,
           inputTokens: 0,
@@ -243,20 +258,39 @@ export function useSessionManager(options: SessionManagerOptions) {
 
   const lifecycleRef = useRef(new SessionLifecycle<ProviderRuntime>());
   const latestProvidersRef = useRef(providerMap);
-  latestProvidersRef.current = providerMap;
   const previousProvidersRef = useRef(providerMap);
   const defaultProviderIdRef = useRef(defaultProviderId);
   defaultProviderIdRef.current = defaultProviderId;
   const streamStatesRef = useRef<Record<string, StreamState>>({});
   const visibleProviderErrorsRef = useRef<Record<string, string>>({});
+  const turnGenerationRef = useRef<Record<string, number>>({});
   const openingSessionsRef = useRef(
     new WeakMap<ChatProvider, Set<string>>(),
   );
   const historyRequestRef = useRef(0);
+  const openIntentRef = useRef(0);
   const scrollRef = useRef({ nearBottom: true });
   const mountedRef = useRef(true);
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  const effectiveProviderMap = useMemo(() => {
+    const effective = new Map(providerMap);
+    for (const tab of state.tabs) {
+      if (effective.has(tab.providerId)) continue;
+      const retained = latestProvidersRef.current.get(tab.providerId);
+      if (retained) effective.set(tab.providerId, retained);
+    }
+    if (!effective.has(defaultProviderId)) {
+      const retainedDefault = latestProvidersRef.current.get(defaultProviderId);
+      if (retainedDefault) effective.set(defaultProviderId, retainedDefault);
+    }
+    return effective;
+  }, [defaultProviderId, providerMap, state.tabs]);
+
+  useLayoutEffect(() => {
+    latestProvidersRef.current = effectiveProviderMap;
+  }, [effectiveProviderMap]);
 
   const resolveProvider = useCallback((providerId: ProviderId): ChatProvider => {
     const provider = latestProvidersRef.current.get(providerId);
@@ -268,10 +302,10 @@ export function useSessionManager(options: SessionManagerOptions) {
   // the retired provider so other providers can keep generating concurrently.
   useEffect(() => {
     const previousProviders = previousProvidersRef.current;
-    previousProvidersRef.current = providerMap;
+    previousProvidersRef.current = effectiveProviderMap;
     const retiredTabIds = new Set<string>();
     for (const [providerId, previousProvider] of previousProviders) {
-      if (providerMap.get(providerId) === previousProvider) continue;
+      if (effectiveProviderMap.get(providerId) === previousProvider) continue;
       for (const tabId of lifecycleRef.current.detachWhere(
         (runtime) => runtime.providerId === providerId,
       )) {
@@ -297,10 +331,11 @@ export function useSessionManager(options: SessionManagerOptions) {
           : tab,
       ),
     }));
-  }, [providerMap]);
+  }, [effectiveProviderMap]);
 
   // Unmount teardown must not enqueue React state updates.
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       lifecycleRef.current.detachAll();
@@ -395,9 +430,10 @@ export function useSessionManager(options: SessionManagerOptions) {
         }));
         updateTabLastAssistant(tabId, () => ({ streaming: false }));
         if (event.exitCode !== 0 && event.exitCode !== null && wasGenerating) {
+          const providerLabel = provider.id === "claude" ? "Claude" : "Codex";
           const errorMsg: Message = {
             role: "assistant",
-            content: `_Claude process exited unexpectedly (code ${event.exitCode}). Start a new conversation to continue._`,
+            content: `_${providerLabel} provider exited unexpectedly (code ${event.exitCode}). Start a new conversation to continue._`,
             thinking: "",
             toolCalls: [],
             orderedBlocks: [],
@@ -481,8 +517,17 @@ export function useSessionManager(options: SessionManagerOptions) {
             toolResultSinceLastText: false,
             skillResultPending: false,
           };
+          const originatingRuntime = lifecycle.getRuntime(tabId);
+          const originatingTurnGeneration = turnGenerationRef.current[tabId];
           setTimeout(() => {
-            lifecycleRef.current.getRuntime(tabId)?.send(
+            const currentLifecycle = lifecycleRef.current;
+            if (
+              !originatingRuntime ||
+              !currentLifecycle.ownsRuntime(lease) ||
+              currentLifecycle.getRuntime(tabId) !== originatingRuntime ||
+              turnGenerationRef.current[tabId] !== originatingTurnGeneration
+            ) return;
+            originatingRuntime.send(
               "Please continue where you left off before the compaction.",
             );
           }, 100);
@@ -797,6 +842,7 @@ export function useSessionManager(options: SessionManagerOptions) {
 
   const newTab = useCallback(() => {
     const id = genId();
+    const providerDefaults = providerDefaultsFor(options, defaultProviderId);
     setState((prev) => {
       return {
         tabs: [
@@ -809,7 +855,7 @@ export function useSessionManager(options: SessionManagerOptions) {
             title: "New conversation",
             messages: [],
             generating: false,
-            model: options.model,
+            ...providerDefaults,
             permissionMode: options.permissionMode,
             agent: options.defaultAgent,
             inputTokens: 0,
@@ -819,7 +865,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         activeTabId: id,
       };
     });
-  }, [defaultProviderId, options.defaultAgent, options.model, options.permissionMode]);
+  }, [defaultProviderId, options.defaultAgent, options.model, options.permissionMode, options.providerDefaults]);
 
   const closeTab = useCallback((tabIdToClose: string) => {
     lifecycleRef.current.cleanupRuntime(tabIdToClose);
@@ -830,6 +876,7 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       if (remaining.length === 0) {
         const newId = genId();
+        const providerDefaults = providerDefaultsFor(options, defaultProviderId);
         return {
           tabs: [
             {
@@ -840,7 +887,7 @@ export function useSessionManager(options: SessionManagerOptions) {
               title: "New conversation",
               messages: [],
               generating: false,
-              model: options.model,
+              ...providerDefaults,
               permissionMode: options.permissionMode,
               agent: options.defaultAgent,
               inputTokens: 0,
@@ -860,7 +907,7 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       return { tabs: remaining, activeTabId };
     });
-  }, [defaultProviderId, options.defaultAgent, options.model, options.permissionMode]);
+  }, [defaultProviderId, options.defaultAgent, options.model, options.permissionMode, options.providerDefaults]);
 
   const switchTab = useCallback((id: string) => {
     setState((prev) => ({ ...prev, activeTabId: id }));
@@ -896,6 +943,8 @@ export function useSessionManager(options: SessionManagerOptions) {
       const provider = resolveProvider(owningTab.providerId);
       const lifecycle = lifecycleRef.current;
       if (!lifecycle.beginTurn(tabId)) return false;
+      turnGenerationRef.current[tabId] =
+        (turnGenerationRef.current[tabId] ?? 0) + 1;
       delete visibleProviderErrorsRef.current[tabId];
 
       // For display, use the typed text; for arrays (image messages) use displayText or placeholder
@@ -959,7 +1008,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         let dispatchEvent: (event: ProviderEvent) => void = () => {};
         runtime = provider.createRuntime({
           cwd: options.cwd,
-          model: currentTab?.model || options.model,
+          model: currentTab?.model ?? providerDefaultsFor(options, owningTab.providerId).model,
           reasoningEffort: currentTab?.reasoningEffort,
           approvalPolicy: currentTab?.approvalPolicy,
           sandboxMode: currentTab?.sandboxMode,
@@ -1191,12 +1240,25 @@ export function useSessionManager(options: SessionManagerOptions) {
         (tab) => tab.id === stateRef.current.activeTabId,
       )?.providerId;
       if (
+        !mountedRef.current ||
         request !== historyRequestRef.current ||
         currentActiveProviderId !== providerId ||
         latestProvidersRef.current.get(providerId) !== provider
       ) return;
       if (sessions.length === 0 && pastSessionsRef.current.length === 0) return;
-      setPastSessions(sessions.map((session) => ({ ...session, providerId })));
+      const nextSessions = sessions.map((session) => ({ ...session, providerId }));
+      setPastSessions((prev) => {
+        const latestActiveProviderId = stateRef.current.tabs.find(
+          (tab) => tab.id === stateRef.current.activeTabId,
+        )?.providerId;
+        if (
+          !mountedRef.current ||
+          request !== historyRequestRef.current ||
+          latestActiveProviderId !== providerId ||
+          latestProvidersRef.current.get(providerId) !== provider
+        ) return prev;
+        return nextSessions;
+      });
     } catch (e) {
       if (mountedRef.current && latestProvidersRef.current.get(providerId) === provider) {
         console.error("[hyo] Failed to list past sessions:", e);
@@ -1219,6 +1281,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         tab.providerSessionId === pastSession.id,
     );
     if (existing) {
+      openIntentRef.current++;
       setState((prev) => ({ ...prev, activeTabId: existing.id }));
       return;
     }
@@ -1230,15 +1293,19 @@ export function useSessionManager(options: SessionManagerOptions) {
     if (providerOpenings.has(openingKey)) return;
     providerOpenings.add(openingKey);
 
+    const openIntent = ++openIntentRef.current;
+    const activeTabIdAtStart = stateRef.current.activeTabId;
     const activeProviderIdAtStart = stateRef.current.tabs.find(
-      (tab) => tab.id === stateRef.current.activeTabId,
+      (tab) => tab.id === activeTabIdAtStart,
     )?.providerId;
     const defaultProviderIdAtStart = defaultProviderId;
     let history: ProviderHistoryMessage[];
     try {
       history = await provider.loadSession(options.cwd, pastSession.id);
     } catch (error) {
-      console.error("[hyo] Failed to load session:", error);
+      if (mountedRef.current && openIntent === openIntentRef.current) {
+        console.error("[hyo] Failed to load session:", error);
+      }
       return;
     } finally {
       providerOpenings.delete(openingKey);
@@ -1247,7 +1314,10 @@ export function useSessionManager(options: SessionManagerOptions) {
       (tab) => tab.id === stateRef.current.activeTabId,
     )?.providerId;
     if (
+      !mountedRef.current ||
+      openIntent !== openIntentRef.current ||
       latestProvidersRef.current.get(pastSession.providerId) !== provider ||
+      stateRef.current.activeTabId !== activeTabIdAtStart ||
       activeProviderId !== activeProviderIdAtStart ||
       defaultProviderIdRef.current !== defaultProviderIdAtStart
     ) return;
@@ -1257,7 +1327,24 @@ export function useSessionManager(options: SessionManagerOptions) {
         tab.providerSessionId === pastSession.id,
     );
     if (openedWhileLoading) {
-      setState((prev) => ({ ...prev, activeTabId: openedWhileLoading.id }));
+      setState((prev) => {
+        const activeTab = prev.tabs.find((tab) => tab.id === prev.activeTabId);
+        const existingTab = prev.tabs.find(
+          (tab) =>
+            tab.providerId === pastSession.providerId &&
+            tab.providerSessionId === pastSession.id,
+        );
+        if (
+          !mountedRef.current ||
+          openIntent !== openIntentRef.current ||
+          latestProvidersRef.current.get(pastSession.providerId) !== provider ||
+          prev.activeTabId !== activeTabIdAtStart ||
+          activeTab?.providerId !== activeProviderIdAtStart ||
+          defaultProviderIdRef.current !== defaultProviderIdAtStart ||
+          !existingTab
+        ) return prev;
+        return { ...prev, activeTabId: existingTab.id };
+      });
       return;
     }
     const messages: Message[] = history.map((m) => ({
@@ -1270,7 +1357,23 @@ export function useSessionManager(options: SessionManagerOptions) {
     }));
 
     const id = genId();
+    const providerDefaults = providerDefaultsFor(options, pastSession.providerId);
     setState((prev) => {
+      const currentActiveTab = prev.tabs.find((tab) => tab.id === prev.activeTabId);
+      if (
+        !mountedRef.current ||
+        openIntent !== openIntentRef.current ||
+        latestProvidersRef.current.get(pastSession.providerId) !== provider ||
+        prev.activeTabId !== activeTabIdAtStart ||
+        currentActiveTab?.providerId !== activeProviderIdAtStart ||
+        defaultProviderIdRef.current !== defaultProviderIdAtStart
+      ) return prev;
+      const existingTab = prev.tabs.find(
+        (tab) =>
+          tab.providerId === pastSession.providerId &&
+          tab.providerSessionId === pastSession.id,
+      );
+      if (existingTab) return { ...prev, activeTabId: existingTab.id };
       return {
         tabs: [
           ...prev.tabs,
@@ -1282,7 +1385,7 @@ export function useSessionManager(options: SessionManagerOptions) {
             title: pastSession.title,
             messages,
             generating: false,
-            model: options.model,
+            ...providerDefaults,
             permissionMode: options.permissionMode,
             agent: options.defaultAgent,
             inputTokens: 0,
@@ -1292,7 +1395,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         activeTabId: id,
       };
     });
-  }, [defaultProviderId, options.cwd, options.model, options.permissionMode, options.defaultAgent]);
+  }, [defaultProviderId, options.cwd, options.model, options.permissionMode, options.defaultAgent, options.providerDefaults]);
 
   const compact = useCallback(() => {
     return sendMessage("/compact", { isCompaction: true });
@@ -1373,14 +1476,23 @@ export function useSessionManager(options: SessionManagerOptions) {
   // ------- return -------
 
   const activeTab = state.tabs.find((t) => t.id === state.activeTabId);
-  const activeProvider = registry.resolve(activeTab?.providerId ?? defaultProviderId);
+  const activeProvider = effectiveProviderMap.get(
+    activeTab?.providerId ?? defaultProviderId,
+  );
+  if (!activeProvider) {
+    throw new Error(
+      `Provider "${activeTab?.providerId ?? defaultProviderId}" is not registered`,
+    );
+  }
 
   return {
     tabs: state.tabs,
     activeTabId: state.activeTabId,
     activeMessages: activeTab?.messages || [],
     activeGenerating: activeTab?.generating || false,
-    activeModel: activeTab?.model || options.model,
+    activeModel:
+      activeTab?.model ??
+      providerDefaultsFor(options, activeTab?.providerId ?? defaultProviderId).model,
     activePermissionMode: activeTab?.permissionMode || options.permissionMode,
     activeAgent: activeTab?.agent || "",
     activeVoiceMode: activeTab?.voiceMode || false,
@@ -1391,7 +1503,9 @@ export function useSessionManager(options: SessionManagerOptions) {
     activeProvider,
     activeProviderCapabilities: activeProvider.capabilities,
     activeProviderOptions: {
-      model: activeTab?.model || options.model,
+      model:
+        activeTab?.model ??
+        providerDefaultsFor(options, activeTab?.providerId ?? defaultProviderId).model,
       reasoningEffort: activeTab?.reasoningEffort,
       approvalPolicy: activeTab?.approvalPolicy,
       sandboxMode: activeTab?.sandboxMode,
