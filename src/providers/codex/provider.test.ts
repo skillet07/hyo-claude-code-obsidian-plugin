@@ -228,6 +228,164 @@ describe("CodexProvider runtime lifecycle", () => {
     await vi.waitFor(() => expect(events).toContainEqual({ type: "text_delta", delta: "early", itemId: "item-1" }));
   });
 
+  it("buffers an early server request until its exact turn is bound", async () => {
+    let handlers!: CodexConnectionHandlers;
+    let earlyApproval!: Promise<unknown>;
+    const turnResponse = deferred<any>();
+    const turnStart = vi.fn(({ threadId }) => {
+      earlyApproval = handlers.onServerRequest({
+        id: "early-approval",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId, turnId: "turn-early", itemId: "item-early",
+          command: "pwd", cwd: "/vault", reason: null,
+          environmentId: "env", approvalId: null, commandActions: null,
+          networkApprovalContext: null, proposedExecpolicyAmendment: null,
+          proposedNetworkPolicyAmendments: null,
+        },
+      });
+      return turnResponse.promise;
+    });
+    const harness = createHarness({ turnStart });
+    const events: ProviderEvent[] = [];
+    const runtime = harness.provider.createRuntime(runtimeOptions((event) => events.push(event)));
+    runtime.start();
+    await vi.waitFor(() => expect(harness.handlers).toHaveLength(1));
+    handlers = harness.handlers[0]!;
+    await vi.waitFor(() => expect(runtime.ready).toBe(true));
+
+    runtime.send("hello");
+    await vi.waitFor(() => expect(turnStart).toHaveBeenCalledTimes(1));
+    expect(events.some((event) => event.type === "approval_requested")).toBe(false);
+
+    turnResponse.resolve({
+      turn: { id: "turn-early", items: [], status: "inProgress" },
+    });
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      type: "approval_requested",
+      requestId: "string:early-approval",
+      threadId: "thread-1",
+      turnId: "turn-early",
+    })));
+    runtime.respondApproval("string:early-approval", "deny");
+    await expect(earlyApproval).resolves.toEqual({ decision: "decline" });
+  });
+
+  it("cancels an exact-turn request buffered for a failed turn/start", async () => {
+    let handlers!: CodexConnectionHandlers;
+    let earlyApproval!: Promise<unknown>;
+    const turnResponse = deferred<any>();
+    const turnStart = vi.fn(({ threadId }) => {
+      earlyApproval = handlers.onServerRequest({
+        id: "failed-early-approval",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId, turnId: "turn-failed", itemId: "item-failed",
+          command: "pwd", cwd: "/vault", reason: null,
+          environmentId: "env", approvalId: null, commandActions: null,
+          networkApprovalContext: null, proposedExecpolicyAmendment: null,
+          proposedNetworkPolicyAmendments: null,
+        },
+      });
+      return turnResponse.promise;
+    });
+    const harness = createHarness({ turnStart });
+    const runtime = harness.provider.createRuntime(runtimeOptions(() => undefined));
+    runtime.start();
+    await vi.waitFor(() => expect(harness.handlers).toHaveLength(1));
+    handlers = harness.handlers[0]!;
+    await vi.waitFor(() => expect(runtime.ready).toBe(true));
+    runtime.send("hello");
+    await vi.waitFor(() => expect(turnStart).toHaveBeenCalledTimes(1));
+
+    turnResponse.reject(new Error("turn start failed"));
+
+    await expect(Promise.race([
+      earlyApproval,
+      new Promise((resolve) => setTimeout(() => resolve("timed out"), 25)),
+    ])).resolves.toEqual({ decision: "cancel" });
+  });
+
+  it("does not deliver a buffered request after the server resolves it", async () => {
+    let handlers!: CodexConnectionHandlers;
+    let earlyApproval!: Promise<unknown>;
+    const turnResponse = deferred<any>();
+    const turnStart = vi.fn(({ threadId }) => {
+      earlyApproval = handlers.onServerRequest({
+        id: "resolved-early-approval",
+        method: "item/fileChange/requestApproval",
+        params: {
+          threadId, turnId: "turn-resolved", itemId: "item-resolved",
+          startedAtMs: 1, reason: null, grantRoot: null,
+        },
+      });
+      return turnResponse.promise;
+    });
+    const harness = createHarness({ turnStart });
+    const events: ProviderEvent[] = [];
+    const runtime = harness.provider.createRuntime(runtimeOptions((event) => events.push(event)));
+    runtime.start();
+    await vi.waitFor(() => expect(harness.handlers).toHaveLength(1));
+    handlers = harness.handlers[0]!;
+    await vi.waitFor(() => expect(runtime.ready).toBe(true));
+    runtime.send("hello");
+    await vi.waitFor(() => expect(turnStart).toHaveBeenCalledTimes(1));
+
+    handlers.onNotification({
+      method: "serverRequest/resolved",
+      params: { threadId: "thread-1", requestId: "resolved-early-approval" },
+    });
+    await expect(earlyApproval).resolves.toBeNull();
+    turnResponse.resolve({
+      turn: { id: "turn-resolved", items: [], status: "inProgress" },
+    });
+    await vi.waitFor(() => expect(runtime.ready).toBe(true));
+    await Promise.resolve();
+
+    expect(events.some((event) => event.type === "approval_requested")).toBe(false);
+  });
+
+  it("auto-cancels an old-turn request after a replacement resumes the same thread", async () => {
+    const { provider, client, handlers } = createHarness();
+    const firstEvents: ProviderEvent[] = [];
+    const first = provider.createRuntime(runtimeOptions((event) => firstEvents.push(event), {
+      providerSessionId: "thread-shared",
+      resume: true,
+    }));
+    first.start();
+    first.send("first turn");
+    await vi.waitFor(() => expect(client.turnStart).toHaveBeenCalledTimes(1));
+    first.cleanup();
+
+    const replacementEvents: ProviderEvent[] = [];
+    const replacement = provider.createRuntime(runtimeOptions(
+      (event) => replacementEvents.push(event),
+      { providerSessionId: "thread-shared", resume: true },
+    ));
+    replacement.start();
+    replacement.send("replacement turn");
+    await vi.waitFor(() => expect(client.turnStart).toHaveBeenCalledTimes(2));
+
+    const late = handlers[0]!.onServerRequest({
+      id: "old-turn-approval",
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-shared", turnId: "turn-1", itemId: "old-item",
+        command: "pwd", cwd: "/vault", reason: null,
+        environmentId: "env", approvalId: null, commandActions: null,
+        networkApprovalContext: null, proposedExecpolicyAmendment: null,
+        proposedNetworkPolicyAmendments: null,
+      },
+    });
+
+    await expect(Promise.race([
+      late,
+      new Promise((resolve) => setTimeout(() => resolve("timed out"), 25)),
+    ])).resolves.toEqual({ decision: "cancel" });
+    expect(replacementEvents.some((event) => event.type === "approval_requested"))
+      .toBe(false);
+  });
+
   it("resumes existing threads and supports interrupt, compact, and rename", async () => {
     const { provider, client } = createHarness();
     const runtime = provider.createRuntime(runtimeOptions(() => undefined, {

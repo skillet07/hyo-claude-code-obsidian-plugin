@@ -21,6 +21,7 @@ type PendingKind = "command" | "file" | "permissions" | "question";
 interface PendingRequest {
   kind: PendingKind;
   threadId: string;
+  turnId: string;
   uiRequestId: string;
   resolve: (response: unknown) => void;
   reject: (error: Error) => void;
@@ -162,6 +163,21 @@ export class CodexServerRequestBroker {
     return cancelled;
   }
 
+  cancelTurn(threadId: string, turnId: string): number {
+    let cancelled = 0;
+    for (const [requestId, pending] of [...this.pending]) {
+      if (pending.threadId !== threadId || pending.turnId !== turnId) continue;
+      this.finish(
+        requestId,
+        pending,
+        safeCancellationResponse(pending.kind),
+        "server",
+      );
+      cancelled++;
+    }
+    return cancelled;
+  }
+
   dispose(): void {
     for (const [requestId, pending] of [...this.pending]) {
       this.finish(requestId, pending, null, "server");
@@ -178,7 +194,7 @@ export class CodexServerRequestBroker {
       availableDecisions.push("apply_network_policy_amendment");
     }
     availableDecisions.push("deny", "cancel");
-    return this.createPending(request.id, "command", params.threadId, {
+    return this.createPending(request.id, "command", params.threadId, params.turnId, {
       type: "approval_requested",
       requestId: toUiRequestId(request.id),
       toolName: "command",
@@ -207,7 +223,7 @@ export class CodexServerRequestBroker {
     request: Extract<ServerRequest, { method: "item/fileChange/requestApproval" }>,
   ): Promise<unknown> {
     const { params } = request;
-    return this.createPending(request.id, "file", params.threadId, {
+    return this.createPending(request.id, "file", params.threadId, params.turnId, {
       type: "approval_requested",
       requestId: toUiRequestId(request.id),
       toolName: "file change",
@@ -225,7 +241,7 @@ export class CodexServerRequestBroker {
     request: Extract<ServerRequest, { method: "item/permissions/requestApproval" }>,
   ): Promise<unknown> {
     const { params } = request;
-    return this.createPending(request.id, "permissions", params.threadId, {
+    return this.createPending(request.id, "permissions", params.threadId, params.turnId, {
       type: "approval_requested",
       requestId: toUiRequestId(request.id),
       toolName: "permissions",
@@ -256,7 +272,7 @@ export class CodexServerRequestBroker {
       isSecret: question.isSecret,
       ...(question.options == null ? {} : { options: question.options }),
     }));
-    return this.createPending(request.id, "question", params.threadId, {
+    return this.createPending(request.id, "question", params.threadId, params.turnId, {
       type: "question_requested",
       requestId: toUiRequestId(request.id),
       threadId: params.threadId,
@@ -271,6 +287,7 @@ export class CodexServerRequestBroker {
     requestId: RequestId,
     kind: PendingKind,
     threadId: string,
+    turnId: string,
     event: ProviderEvent,
     autoResolutionMs: number | null = null,
   ): Promise<unknown> {
@@ -280,7 +297,7 @@ export class CodexServerRequestBroker {
     }
     let pending!: PendingRequest;
     const promise = new Promise<unknown>((resolve, reject) => {
-      pending = { kind, threadId, uiRequestId, resolve, reject };
+      pending = { kind, threadId, turnId, uiRequestId, resolve, reject };
     });
     if (autoResolutionMs != null) {
       pending.timer = setTimeout(() => {

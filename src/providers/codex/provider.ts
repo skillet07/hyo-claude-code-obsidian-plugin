@@ -27,7 +27,10 @@ import {
   type CodexAppServerProcess,
 } from "./app-server-process";
 import type { JsonRpcNotification, JsonRpcServerRequest } from "./jsonl-transport";
-import { CodexNotificationRouter } from "./notification-router";
+import {
+  CODEX_ROUTER_DEFAULTS,
+  CodexNotificationRouter,
+} from "./notification-router";
 import {
   CodexServerRequestBroker,
   type ProviderApprovalResponse,
@@ -122,6 +125,7 @@ interface ActiveConnection {
   disposeClient: () => void;
   router: CodexNotificationRouter;
   broker: CodexServerRequestBroker;
+  requestRouter: CodexBrokerRequestRouter;
   requestOwners: Map<string, PendingRequestOwner>;
   stopping: boolean;
   failed: boolean;
@@ -131,6 +135,268 @@ interface PendingRequestOwner {
   runtimeId: string;
   approvalKind?: "command_execution" | "file_change" | "permissions";
   permissions?: Record<string, unknown>;
+}
+
+type BrokerRequestEvent =
+  | Extract<ProviderEvent, { type: "approval_requested" }>
+  | Extract<ProviderEvent, { type: "question_requested" }>;
+
+interface BufferedBrokerRequest {
+  sequence: number;
+  event: BrokerRequestEvent;
+  candidateRuntimeIds: Set<string>;
+  expiresAt: number;
+}
+
+class CodexBrokerRequestRouter {
+  private readonly turnOwners = new Map<string, string>();
+  private readonly bufferedByTurn = new Map<string, BufferedBrokerRequest[]>();
+  private readonly retiredTurns = new Map<string, unknown>();
+  private bufferedTotal = 0;
+  private sequence = 0;
+  private expiryTimer: unknown;
+
+  constructor(
+    private readonly generation: number,
+    private readonly broker: CodexServerRequestBroker,
+    private readonly requestOwners: Map<string, PendingRequestOwner>,
+    private readonly getRuntimes: () => Iterable<CodexRuntime>,
+    private readonly getRuntime: (runtimeId: string) => CodexRuntime | undefined,
+  ) {}
+
+  route(event: BrokerRequestEvent): void {
+    this.pruneExpired();
+    const { threadId, turnId } = event;
+    if (!threadId || !turnId) {
+      this.broker.cancelRequest(event.requestId);
+      return;
+    }
+    const key = turnKey(threadId, turnId);
+    if (this.retiredTurns.has(key)) {
+      this.broker.cancelRequest(event.requestId);
+      return;
+    }
+    const ownerId = this.turnOwners.get(key);
+    const owner = ownerId ? this.getRuntime(ownerId) : undefined;
+    if (owner) {
+      this.deliver(owner, event);
+      return;
+    }
+
+    const candidateRuntimeIds = new Set(
+      [...this.getRuntimes()]
+        .filter((runtime) =>
+          runtime.threadId === threadId &&
+          runtime.isAwaitingTurn(this.generation),
+        )
+        .map((runtime) => runtime.runtimeId),
+    );
+    if (candidateRuntimeIds.size === 0) {
+      this.broker.cancelRequest(event.requestId);
+      return;
+    }
+    this.buffer({
+      sequence: this.sequence++,
+      event,
+      candidateRuntimeIds,
+      expiresAt: Date.now() + CODEX_ROUTER_DEFAULTS.bufferTtlMs,
+    });
+  }
+
+  bind(runtime: CodexRuntime, turnId: string): boolean {
+    const threadId = runtime.threadId;
+    if (!threadId) return false;
+    const key = turnKey(threadId, turnId);
+    if (this.retiredTurns.has(key)) return false;
+    this.turnOwners.set(key, runtime.runtimeId);
+    const buffered = this.bufferedByTurn.get(key) ?? [];
+    this.bufferedByTurn.delete(key);
+    for (const entry of buffered.sort((left, right) => left.sequence - right.sequence)) {
+      this.bufferedTotal--;
+      if (entry.candidateRuntimeIds.has(runtime.runtimeId)) {
+        this.deliver(runtime, entry.event);
+      } else {
+        this.broker.cancelRequest(entry.event.requestId);
+      }
+    }
+    this.removeCandidate(runtime.runtimeId);
+    this.scheduleExpiry();
+    return true;
+  }
+
+  failPending(runtime: CodexRuntime): void {
+    this.removeCandidate(runtime.runtimeId);
+  }
+
+  forgetRequest(requestId: string): void {
+    for (const [key, entries] of this.bufferedByTurn) {
+      const keep = entries.filter((entry) => {
+        if (entry.event.requestId !== requestId) return true;
+        this.bufferedTotal--;
+        return false;
+      });
+      if (keep.length === 0) this.bufferedByTurn.delete(key);
+      else this.bufferedByTurn.set(key, keep);
+    }
+    this.scheduleExpiry();
+  }
+
+  cleanupRuntime(runtime: CodexRuntime): void {
+    this.removeCandidate(runtime.runtimeId);
+    for (const [key, ownerId] of [...this.turnOwners]) {
+      if (ownerId !== runtime.runtimeId) continue;
+      const [threadId, turnId] = splitTurnKey(key);
+      this.turnOwners.delete(key);
+      this.broker.cancelTurn(threadId, turnId);
+      this.retire(key);
+    }
+  }
+
+  retireRuntimeTurn(runtime: CodexRuntime, turnId: string): void {
+    const threadId = runtime.threadId;
+    if (!threadId) return;
+    const key = turnKey(threadId, turnId);
+    if (this.turnOwners.get(key) !== runtime.runtimeId) return;
+    this.turnOwners.delete(key);
+    this.broker.cancelTurn(threadId, turnId);
+    this.retire(key);
+  }
+
+  dispose(): void {
+    if (this.expiryTimer !== undefined) clearTimeout(this.expiryTimer as ReturnType<typeof setTimeout>);
+    this.expiryTimer = undefined;
+    for (const timer of this.retiredTurns.values()) {
+      clearTimeout(timer as ReturnType<typeof setTimeout>);
+    }
+    const bufferedRequestIds = [...this.bufferedByTurn.values()]
+      .flatMap((entries) => entries.map((entry) => entry.event.requestId));
+    this.bufferedByTurn.clear();
+    this.turnOwners.clear();
+    this.retiredTurns.clear();
+    this.bufferedTotal = 0;
+    for (const requestId of bufferedRequestIds) {
+      this.broker.cancelRequest(requestId);
+    }
+  }
+
+  private deliver(runtime: CodexRuntime, event: BrokerRequestEvent): void {
+    this.requestOwners.set(event.requestId, pendingRequestOwner(runtime, event));
+    runtime.deliver(event);
+  }
+
+  private buffer(entry: BufferedBrokerRequest): void {
+    const key = turnKey(entry.event.threadId!, entry.event.turnId!);
+    const queue = this.bufferedByTurn.get(key) ?? [];
+    while (queue.length >= CODEX_ROUTER_DEFAULTS.maxBufferedPerItem) {
+      const evicted = queue.shift();
+      if (evicted) {
+        this.bufferedTotal--;
+        this.broker.cancelRequest(evicted.event.requestId);
+      }
+    }
+    while (this.bufferedTotal >= CODEX_ROUTER_DEFAULTS.maxBufferedTotal) {
+      this.evictOldest();
+    }
+    queue.push(entry);
+    this.bufferedTotal++;
+    this.bufferedByTurn.set(key, queue);
+    this.scheduleExpiry();
+  }
+
+  private evictOldest(): void {
+    let oldestKey: string | undefined;
+    let oldest: BufferedBrokerRequest | undefined;
+    for (const [key, entries] of this.bufferedByTurn) {
+      if (entries[0] && (!oldest || entries[0].sequence < oldest.sequence)) {
+        oldestKey = key;
+        oldest = entries[0];
+      }
+    }
+    if (!oldestKey || !oldest) return;
+    const queue = this.bufferedByTurn.get(oldestKey)!;
+    queue.shift();
+    this.bufferedTotal--;
+    this.broker.cancelRequest(oldest.event.requestId);
+    if (queue.length === 0) this.bufferedByTurn.delete(oldestKey);
+  }
+
+  private removeCandidate(runtimeId: string): void {
+    for (const [key, entries] of this.bufferedByTurn) {
+      const keep: BufferedBrokerRequest[] = [];
+      const cancelRequestIds: string[] = [];
+      for (const entry of entries) {
+        entry.candidateRuntimeIds.delete(runtimeId);
+        if (entry.candidateRuntimeIds.size > 0) {
+          keep.push(entry);
+        } else {
+          this.bufferedTotal--;
+          cancelRequestIds.push(entry.event.requestId);
+        }
+      }
+      if (keep.length === 0) this.bufferedByTurn.delete(key);
+      else this.bufferedByTurn.set(key, keep);
+      for (const requestId of cancelRequestIds) {
+        this.broker.cancelRequest(requestId);
+      }
+    }
+    this.scheduleExpiry();
+  }
+
+  private pruneExpired(): void {
+    const now = Date.now();
+    for (const [key, entries] of this.bufferedByTurn) {
+      const keep: BufferedBrokerRequest[] = [];
+      const cancelRequestIds: string[] = [];
+      for (const entry of entries) {
+        if (entry.expiresAt > now) {
+          keep.push(entry);
+        } else {
+          this.bufferedTotal--;
+          cancelRequestIds.push(entry.event.requestId);
+        }
+      }
+      if (keep.length === 0) this.bufferedByTurn.delete(key);
+      else this.bufferedByTurn.set(key, keep);
+      for (const requestId of cancelRequestIds) {
+        this.broker.cancelRequest(requestId);
+      }
+    }
+    this.scheduleExpiry();
+  }
+
+  private scheduleExpiry(): void {
+    if (this.expiryTimer !== undefined) {
+      clearTimeout(this.expiryTimer as ReturnType<typeof setTimeout>);
+      this.expiryTimer = undefined;
+    }
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const entries of this.bufferedByTurn.values()) {
+      for (const entry of entries) nearest = Math.min(nearest, entry.expiresAt);
+    }
+    if (!Number.isFinite(nearest)) return;
+    this.expiryTimer = setTimeout(() => {
+      this.expiryTimer = undefined;
+      this.pruneExpired();
+    }, Math.max(0, nearest - Date.now()));
+  }
+
+  private retire(key: string): void {
+    const existing = this.retiredTurns.get(key);
+    if (existing !== undefined) {
+      clearTimeout(existing as ReturnType<typeof setTimeout>);
+    }
+    const buffered = this.bufferedByTurn.get(key) ?? [];
+    this.bufferedByTurn.delete(key);
+    for (const entry of buffered) {
+      this.bufferedTotal--;
+      this.broker.cancelRequest(entry.event.requestId);
+    }
+    const timer = setTimeout(() => {
+      this.retiredTurns.delete(key);
+    }, CODEX_ROUTER_DEFAULTS.retiredTurnTtlMs);
+    this.retiredTurns.set(key, timer);
+    this.scheduleExpiry();
+  }
 }
 
 export class CodexProvider implements ChatProvider {
@@ -321,9 +587,7 @@ export class CodexProvider implements ChatProvider {
   unregisterRuntime(runtime: CodexRuntime): void {
     if (this.runtimes.get(runtime.runtimeId) !== runtime) return;
     const connection = this.active;
-    if (connection && runtime.threadId) {
-      connection.broker.cancelThread(runtime.threadId);
-    }
+    connection?.requestRouter.cleanupRuntime(runtime);
     if (connection) {
       for (const [requestId, owner] of connection.requestOwners) {
         if (owner.runtimeId === runtime.runtimeId) {
@@ -333,6 +597,28 @@ export class CodexProvider implements ChatProvider {
     }
     this.runtimes.delete(runtime.runtimeId);
     connection?.router.unregisterRuntime(runtime.runtimeId);
+  }
+
+  bindRuntimeTurn(
+    runtime: CodexRuntime,
+    connection: ActiveConnection,
+    turnId: string,
+  ): boolean {
+    if (!this.isActive(connection)) return false;
+    const notificationBound = connection.router.bindTurn(runtime.runtimeId, turnId);
+    const requestBound = connection.requestRouter.bind(runtime, turnId);
+    return notificationBound && requestBound;
+  }
+
+  failPendingRuntimeTurn(
+    runtime: CodexRuntime,
+    connection: ActiveConnection,
+  ): void {
+    if (this.active === connection) connection.requestRouter.failPending(runtime);
+  }
+
+  retireRuntimeTurn(runtime: CodexRuntime, turnId: string): void {
+    this.active?.requestRouter.retireRuntimeTurn(runtime, turnId);
   }
 
   respondApproval(
@@ -402,9 +688,17 @@ export class CodexProvider implements ChatProvider {
     const router = new CodexNotificationRouter();
     const requestOwners = new Map<string, PendingRequestOwner>();
     let connection: ActiveConnection | undefined;
+    let requestRouter!: CodexBrokerRequestRouter;
     const broker = new CodexServerRequestBroker((event) => {
-      this.routeBrokerEvent(connection, broker, requestOwners, event);
+      this.routeBrokerEvent(connection, requestRouter, requestOwners, event);
     });
+    requestRouter = new CodexBrokerRequestRouter(
+      generation,
+      broker,
+      requestOwners,
+      () => this.runtimes.values(),
+      (runtimeId) => this.runtimes.get(runtimeId),
+    );
     const handlers: CodexConnectionHandlers = {
       onNotification: (notification) => {
         if (notification.method === "serverRequest/resolved") {
@@ -427,6 +721,7 @@ export class CodexProvider implements ChatProvider {
         disposeClient: initialized.dispose,
         router,
         broker,
+        requestRouter,
         requestOwners,
         stopping: false,
         failed: false,
@@ -440,6 +735,7 @@ export class CodexProvider implements ChatProvider {
       return connection;
     } catch (error) {
       router.dispose();
+      requestRouter.dispose();
       broker.dispose();
       if (!connection?.stopping) {
         void process.stop().catch(() => undefined);
@@ -450,38 +746,16 @@ export class CodexProvider implements ChatProvider {
 
   private routeBrokerEvent(
     connection: ActiveConnection | undefined,
-    broker: CodexServerRequestBroker,
+    requestRouter: CodexBrokerRequestRouter,
     requestOwners: Map<string, PendingRequestOwner>,
     event: ProviderEvent,
   ): void {
     if (event.type === "approval_requested" || event.type === "question_requested") {
-      const runtime = [...this.runtimes.values()].find(
-        (candidate) => candidate.threadId === event.threadId,
-      );
-      if (!runtime) {
-        broker.cancelRequest(event.requestId);
-        return;
-      }
-      requestOwners.set(event.requestId, {
-        runtimeId: runtime.runtimeId,
-        ...(event.type === "approval_requested"
-          ? {
-            approvalKind: event.approvalKind,
-            ...(event.approvalKind === "permissions" &&
-              typeof event.input === "object" &&
-              event.input !== null &&
-              "permissions" in event.input &&
-              typeof event.input.permissions === "object" &&
-              event.input.permissions !== null
-              ? { permissions: event.input.permissions as Record<string, unknown> }
-              : {}),
-          }
-          : {}),
-      });
-      runtime.deliver(event);
+      requestRouter.route(event);
       return;
     }
     if (event.type === "request_resolved") {
+      requestRouter.forgetRequest(event.requestId);
       const runtimeId = requestOwners.get(event.requestId)?.runtimeId;
       requestOwners.delete(event.requestId);
       const runtime = runtimeId ? this.runtimes.get(runtimeId) : undefined;
@@ -512,6 +786,7 @@ export class CodexProvider implements ChatProvider {
     ) return;
     connection.failed = true;
     this.active = undefined;
+    connection.requestRouter.dispose();
     connection.broker.dispose();
     connection.router.dispose();
     connection.disposeClient();
@@ -524,6 +799,7 @@ export class CodexProvider implements ChatProvider {
   private stopConnection(connection: ActiveConnection): void {
     if (connection.stopping) return;
     connection.stopping = true;
+    connection.requestRouter.dispose();
     connection.broker.dispose();
     connection.router.dispose();
     connection.disposeClient();
@@ -552,6 +828,7 @@ export class CodexRuntime implements ProviderRuntime {
   private reportedErrors = new WeakSet<Error>();
   private sendSequence = 0;
   private activeSend: { id: number; terminal: boolean } | undefined;
+  private awaitingTurnGeneration: number | undefined;
 
   constructor(
     readonly runtimeId: string,
@@ -575,6 +852,10 @@ export class CodexRuntime implements ProviderRuntime {
 
   isRunning(): boolean {
     return this.started && !this.cleaned;
+  }
+
+  isAwaitingTurn(generation: number): boolean {
+    return !this.cleaned && this.awaitingTurnGeneration === generation;
   }
 
   send(content: string | unknown[]): void {
@@ -662,6 +943,9 @@ export class CodexRuntime implements ProviderRuntime {
     if (event.type === "turn_completed") {
       if (!this.acceptTerminalEvent()) return;
       this.turnInFlight = false;
+      if (this.currentTurnId) {
+        this.provider.retireRuntimeTurn(this, this.currentTurnId);
+      }
     }
     this.options.onEvent(event);
   }
@@ -762,10 +1046,19 @@ export class CodexRuntime implements ProviderRuntime {
     const connection = await this.provider.ensureRuntimeThread(this);
     if (!this.threadId) throw new Error("Codex thread is not ready");
     this.turnInFlight = true;
-    const response = await connection.client.turnStart({
-      threadId: this.threadId,
-      input,
-    });
+    this.awaitingTurnGeneration = connection.generation;
+    let response: TurnStartResponse;
+    try {
+      response = await connection.client.turnStart({
+        threadId: this.threadId,
+        input,
+      });
+    } catch (error) {
+      this.awaitingTurnGeneration = undefined;
+      this.provider.failPendingRuntimeTurn(this, connection);
+      throw error;
+    }
+    this.awaitingTurnGeneration = undefined;
     this.currentTurnId = response.turn.id;
     if (this.cleaned) {
       await connection.client.turnInterrupt({
@@ -777,7 +1070,9 @@ export class CodexRuntime implements ProviderRuntime {
     if (!this.provider.isActive(connection)) {
       throw new Error("Codex app-server connection was lost while starting the turn");
     }
-    connection.router.bindTurn(this.runtimeId, response.turn.id);
+    if (!this.provider.bindRuntimeTurn(this, connection, response.turn.id)) {
+      throw new Error(`Codex turn ${response.turn.id} could not be bound to its runtime`);
+    }
     this.emitSessionMetadata();
   }
 
@@ -793,6 +1088,38 @@ export class CodexRuntime implements ProviderRuntime {
     });
   }
 
+}
+
+function pendingRequestOwner(
+  runtime: CodexRuntime,
+  event: BrokerRequestEvent,
+): PendingRequestOwner {
+  if (event.type !== "approval_requested") {
+    return { runtimeId: runtime.runtimeId };
+  }
+  const permissions =
+    event.approvalKind === "permissions" &&
+    typeof event.input === "object" &&
+    event.input !== null &&
+    "permissions" in event.input &&
+    typeof event.input.permissions === "object" &&
+    event.input.permissions !== null
+      ? event.input.permissions as Record<string, unknown>
+      : undefined;
+  return {
+    runtimeId: runtime.runtimeId,
+    approvalKind: event.approvalKind,
+    ...(permissions ? { permissions } : {}),
+  };
+}
+
+function turnKey(threadId: string, turnId: string): string {
+  return `${threadId}\u0000${turnId}`;
+}
+
+function splitTurnKey(key: string): [string, string] {
+  const separator = key.indexOf("\u0000");
+  return [key.slice(0, separator), key.slice(separator + 1)];
 }
 
 function threadConfiguration(options: ProviderRuntimeOptions): Omit<ThreadStartParams, "threadId"> {
