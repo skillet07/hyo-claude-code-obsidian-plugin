@@ -1,19 +1,38 @@
-import { useState, useCallback, useRef, useEffect } from "react";
-import { ClaudeTransport, normalizeModelId } from "../claude-transport";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import type {
   Message,
   ToolCallData,
   OrderedBlock,
-  AskQuestionData,
-  PlanReviewData,
-} from "./useChatEngine";
-import { listPastSessions, loadSessionHistory, saveCustomTitle, type PastSession, getProjectDir } from "../session-parser";
-import { repairSession, isThinkingBlockApiError, type RepairResult } from "../session-repair";
-import { generateConversationTitle } from "../title-generator";
-import * as path from "path";
+} from "../chat-types";
+import { ProviderRegistry } from "../providers/registry";
+import { createClaudeProvider } from "../providers/claude/provider";
+import type {
+  ChatProvider,
+  ProviderContentBlock,
+  ProviderEvent,
+  ProviderHistoryMessage,
+  ProviderId,
+  ProviderApprovalSelection,
+  ProviderRecoveryResult,
+  ProviderRuntime,
+  ProviderSessionSummary,
+  ProviderSessionOptions,
+} from "../providers/types";
+import {
+  applyAgentMessageCompletion,
+  applyPlanDelta,
+  applyPlanUpdate,
+  applyProviderTextDelta,
+  applyReasoningCompletion,
+  createVisibleProviderWarning,
+} from "../providers/event-reducer";
+import {
+  SessionLifecycle,
+  type RuntimeLease,
+} from "./session-lifecycle";
 
 // Re-export for convenience
-export type { PastSession };
+export type PastSession = ProviderSessionSummary;
 
 // ------- types -------
 
@@ -27,11 +46,22 @@ interface StreamState {
 
 export interface TabSession {
   id: string;
-  cliSessionId: string | null;
+  readonly providerId: ProviderId;
+  readonly providerSessionId: string | null;
+  readonly providerState: unknown;
+  /** Immutable launch settings captured when this tab is created/opened. */
+  readonly runtimeConfiguration?: {
+    cwd: string;
+    maxOutputTokens?: number;
+  };
   title: string;
   messages: Message[];
   generating: boolean;
   model: string;
+  reasoningEffort?: string;
+  approvalPolicy?: ProviderSessionOptions["approvalPolicy"];
+  sandboxMode?: ProviderSessionOptions["sandboxMode"];
+  networkAccess?: boolean;
   permissionMode: string;
   agent: string;
   inputTokens: number;
@@ -44,7 +74,7 @@ interface SessionState {
   activeTabId: string;
 }
 
-interface SessionManagerOptions {
+export interface SessionManagerOptions {
   cliPath: string;
   cwd: string;
   model: string;
@@ -53,27 +83,12 @@ interface SessionManagerOptions {
   maxOutputTokens?: number;
   settingsVersion?: number;
   autoGenerateTitles?: boolean;
+  providers?: ChatProvider[];
+  defaultProviderId?: ProviderId;
+  providerDefaults?: Partial<Record<ProviderId, Partial<ProviderSessionOptions>>>;
 }
 
 // ------- utilities -------
-
-function readPlanFile(cwd: string): string | null {
-  try {
-    const fs = require("fs");
-    const planPath = path.join(cwd, ".claude", "plan.md");
-    if (fs.existsSync(planPath)) {
-      return fs.readFileSync(planPath, "utf-8");
-    }
-    // Also check project root
-    const rootPlanPath = path.join(cwd, "plan.md");
-    if (fs.existsSync(rootPlanPath)) {
-      return fs.readFileSync(rootPlanPath, "utf-8");
-    }
-  } catch {
-    // File system not available or file not found
-  }
-  return null;
-}
 
 function genId(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -82,7 +97,25 @@ function genId(): string {
   });
 }
 
-function processContentBlocks(contentArr: any[], ss: StreamState, source: "user" | "assistant") {
+function providerDefaultsFor(
+  options: SessionManagerOptions,
+  providerId: ProviderId,
+): ProviderSessionOptions {
+  const configured = options.providerDefaults?.[providerId];
+  return {
+    model: configured?.model ?? (providerId === "claude" ? options.model : ""),
+    reasoningEffort: configured?.reasoningEffort,
+    approvalPolicy: configured?.approvalPolicy,
+    sandboxMode: configured?.sandboxMode,
+    networkAccess: configured?.networkAccess,
+  };
+}
+
+function processContentBlocks(
+  contentArr: ProviderContentBlock[],
+  ss: StreamState,
+  source: "user" | "assistant",
+) {
   for (const block of contentArr) {
     if (block.type === "text") {
       if (ss.toolResultSinceLastText && ss.orderedBlocks.length > 0)
@@ -141,7 +174,7 @@ function processContentBlocks(contentArr: any[], ss: StreamState, source: "user"
         }
       }
     } else if (block.type === "tool_result") {
-      const tool = ss.toolCalls.find((t) => t.id === block.tool_use_id);
+      const tool = ss.toolCalls.find((t) => t.id === block.toolUseId);
       if (tool) {
         tool.result =
           typeof block.content === "string"
@@ -182,20 +215,47 @@ function buildSnapshot(ss: StreamState) {
   };
 }
 
+function serializeProviderValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined) return "completed";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 // ------- hook -------
 
 export function useSessionManager(options: SessionManagerOptions) {
+  const providers = useMemo(
+    () => options.providers ?? [createClaudeProvider({ cliPath: options.cliPath })],
+    [options.providers, options.cliPath],
+  );
+  const registry = useMemo(() => new ProviderRegistry(providers), [providers]);
+  const providerMap = useMemo(
+    () => new Map<ProviderId, ChatProvider>(registry.entries()),
+    [registry],
+  );
+  const defaultProviderId = options.defaultProviderId ?? "claude";
   const [state, setState] = useState<SessionState>(() => {
     const id = genId();
+    const providerDefaults = providerDefaultsFor(options, defaultProviderId);
     return {
       tabs: [
         {
           id,
-          cliSessionId: null,
+          providerId: defaultProviderId,
+          providerSessionId: null,
+          providerState: null,
+          runtimeConfiguration: {
+            cwd: options.cwd,
+            maxOutputTokens: options.maxOutputTokens,
+          },
           title: "New conversation",
           messages: [],
           generating: false,
-          model: options.model,
+          ...providerDefaults,
           permissionMode: options.permissionMode,
           agent: options.defaultAgent,
           inputTokens: 0,
@@ -206,20 +266,110 @@ export function useSessionManager(options: SessionManagerOptions) {
     };
   });
 
-  const [pastSessions, setPastSessions] = useState<PastSession[]>([]);
+  const [pastSessions, setPastSessions] = useState<ProviderSessionSummary[]>([]);
+  const pastSessionsRef = useRef(pastSessions);
+  pastSessionsRef.current = pastSessions;
 
-  const transportsRef = useRef<Record<string, ClaudeTransport>>({});
+  const lifecycleRef = useRef(new SessionLifecycle<ProviderRuntime>());
+  const latestProvidersRef = useRef(providerMap);
+  const publishedProvidersRef = useRef(providerMap);
+  const previousProvidersRef = useRef(providerMap);
+  const defaultProviderIdRef = useRef(defaultProviderId);
+  defaultProviderIdRef.current = defaultProviderId;
   const streamStatesRef = useRef<Record<string, StreamState>>({});
+  const visibleProviderErrorsRef = useRef<Record<string, string>>({});
+  const turnGenerationRef = useRef<Record<string, number>>({});
+  const retiredTabIdsRef = useRef(new Set<string>());
+  const openingSessionsRef = useRef(
+    new WeakMap<ChatProvider, Set<string>>(),
+  );
+  const historyRequestRef = useRef(0);
+  const openIntentRef = useRef(0);
   const scrollRef = useRef({ nearBottom: true });
+  const mountedRef = useRef(true);
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  // Cleanup transports on unmount
-  useEffect(() => {
-    return () => {
-      for (const id of Object.keys(transportsRef.current)) {
-        transportsRef.current[id]?.stop();
+  const effectiveProviderMap = useMemo(() => {
+    const effective = new Map(providerMap);
+    for (const tab of state.tabs) {
+      if (effective.has(tab.providerId)) continue;
+      const retained = latestProvidersRef.current.get(tab.providerId);
+      if (retained) effective.set(tab.providerId, retained);
+    }
+    if (!effective.has(defaultProviderId)) {
+      const retainedDefault = latestProvidersRef.current.get(defaultProviderId);
+      if (retainedDefault) effective.set(defaultProviderId, retainedDefault);
+    }
+    return effective;
+  }, [defaultProviderId, providerMap, state.tabs]);
+
+  useLayoutEffect(() => {
+    const previouslyPublished = publishedProvidersRef.current;
+    latestProvidersRef.current = effectiveProviderMap;
+    publishedProvidersRef.current = effectiveProviderMap;
+    const retiredTabIds = new Set<string>();
+    for (const [providerId, previousProvider] of previouslyPublished) {
+      if (effectiveProviderMap.get(providerId) === previousProvider) continue;
+      for (const tabId of lifecycleRef.current.detachWhere(
+        (runtime) => runtime.providerId === providerId,
+      )) {
+        retiredTabIds.add(tabId);
+        retiredTabIdsRef.current.add(tabId);
       }
+    }
+    if (retiredTabIds.size === 0) return;
+    for (const tabId of retiredTabIds) delete streamStatesRef.current[tabId];
+  }, [effectiveProviderMap]);
+
+  const resolveProvider = useCallback((providerId: ProviderId): ChatProvider => {
+    const provider = latestProvidersRef.current.get(providerId);
+    if (!provider) throw new Error(`Provider "${providerId}" is not registered`);
+    return provider;
+  }, []);
+
+  // Provider replacement happens while mounted. Detach only leases owned by
+  // the retired provider so other providers can keep generating concurrently.
+  useEffect(() => {
+    const previousProviders = previousProvidersRef.current;
+    previousProvidersRef.current = effectiveProviderMap;
+    const retiredTabIds = new Set(
+      [...retiredTabIdsRef.current].filter(
+        (tabId) => !lifecycleRef.current.getRuntime(tabId),
+      ),
+    );
+    retiredTabIdsRef.current.clear();
+    if (retiredTabIds.size > 0) {
+      setState((prev) => ({
+        ...prev,
+        tabs: prev.tabs.map((tab) =>
+          retiredTabIds.has(tab.id)
+            ? {
+                ...tab,
+                generating: false,
+                messages: tab.messages.map((message) =>
+                  message.role === "assistant" && message.streaming
+                    ? { ...message, streaming: false }
+                    : message,
+                ),
+              }
+            : tab,
+        ),
+      }));
+    }
+    for (const [providerId, previousProvider] of previousProviders) {
+      if (effectiveProviderMap.get(providerId) === previousProvider) continue;
+      previousProvider.cleanup();
+    }
+  }, [effectiveProviderMap]);
+
+  // Unmount teardown must not enqueue React state updates.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      lifecycleRef.current.detachAll();
+      for (const provider of latestProvidersRef.current.values()) provider.cleanup();
     };
   }, []);
 
@@ -245,427 +395,590 @@ export function useSessionManager(options: SessionManagerOptions) {
     []
   );
 
+  const surfaceProviderError = useCallback((
+    tabId: string,
+    error: string,
+    terminal: boolean,
+  ) => {
+    const text = `Provider error: ${error}`;
+    updateTabLastAssistant(tabId, (message) => {
+      const alreadyVisible =
+        message.content.includes(error) ||
+        (message.orderedBlocks ?? []).some(
+          (block) => block.type === "text" && block.content?.includes(error),
+        );
+      if (alreadyVisible) return terminal ? { streaming: false } : {};
+      if ((message.orderedBlocks ?? []).length > 0) {
+        return {
+          content: [message.content, text].filter(Boolean).join("\n\n"),
+          orderedBlocks: [
+            ...(message.orderedBlocks ?? []),
+            { type: "text", content: text, turnIndex: Number.MAX_SAFE_INTEGER },
+          ],
+          ...(terminal ? { streaming: false } : {}),
+        };
+      }
+      return {
+        content: text,
+        ...(terminal ? { streaming: false } : {}),
+      };
+    });
+  }, [updateTabLastAssistant]);
+
   const makeProcessEvent = useCallback(
-    (tabId: string) => {
-      return (event: any) => {
-        if (event.type === "stream_event") {
-          const evt = event.event || event;
-          if (evt.type !== "content_block_delta") {
-            console.log("[hyo] event:", event.type, evt.type);
-          }
-        } else {
-          console.log(
-            "[hyo] event:",
-            event.type,
-            event.subtype || event.request?.subtype || ""
-          );
-        }
+    (tabId: string, lease: RuntimeLease, provider: ChatProvider) => (event: ProviderEvent) => {
+      const lifecycle = lifecycleRef.current;
+      if (!lifecycle.ownsRuntime(lease)) return;
 
-        const ss = streamStatesRef.current[tabId];
-        if (!ss) return;
-
-        // System init
-        if (event.type === "system" && event.subtype === "init") {
-          if (event.session_id) {
-            setState((prev) => ({
-              ...prev,
-              tabs: prev.tabs.map((tab) =>
-                tab.id === tabId
-                  ? { ...tab, cliSessionId: event.session_id }
-                  : tab
-              ),
-            }));
-          }
-          return;
-        }
-
-        // Auto-compaction marker (compact_boundary fires when the CLI auto-compacts)
-        if (event.type === "system" && event.subtype === "compact_boundary") {
-          // Only handle as auto-compact if this wasn't triggered by a manual /compact
-          // (manual compact already has a streaming isCompaction assistant message)
-          const currentTab = stateRef.current.tabs.find((t) => t.id === tabId);
-          const alreadyHasCompactionMarker = currentTab?.messages.some(
-            (m) => m.isCompaction && m.streaming
-          );
-          if (!alreadyHasCompactionMarker) {
-            // Mark the currently-streaming pre-compact assistant message as complete,
-            // add the compacted marker, then add a new streaming assistant message
-            // to receive the continuation. Reset the stream state so new content
-            // doesn't merge with pre-compact content.
-            const markerMsg: Message = {
-              role: "assistant",
-              content: "compacted",
-              isCompaction: true,
-              streaming: false,
-              toolCalls: [],
-              orderedBlocks: [],
-            };
-            const continuationMsg: Message = {
-              role: "assistant",
-              content: "",
-              thinking: "",
-              toolCalls: [],
-              orderedBlocks: [],
-              streaming: true,
-            };
-            setState((prev) => ({
-              ...prev,
-              tabs: prev.tabs.map((tab) => {
-                if (tab.id !== tabId) return tab;
-                const msgs = [...tab.messages];
-                for (let i = msgs.length - 1; i >= 0; i--) {
-                  if (msgs[i].role === "assistant" && msgs[i].streaming) {
-                    msgs[i] = { ...msgs[i], streaming: false };
-                    break;
-                  }
-                }
-                return {
-                  ...tab,
-                  messages: [...msgs, markerMsg, continuationMsg],
-                  generating: true,
-                };
-              }),
-            }));
-            streamStatesRef.current[tabId] = {
-              toolCalls: [],
-              orderedBlocks: [],
-              turnIndex: 0,
-              toolResultSinceLastText: false,
-              skillResultPending: false,
-            };
-            // Nudge the CLI to resume what it was doing before compaction.
-            setTimeout(() => {
-              transportsRef.current[tabId]?.sendUserMessage(
-                "Please continue where you left off before the compaction."
-              );
-            }, 100);
-          }
-          return;
-        }
-
-        if (event.type === "system") return;
-
-        // Permission request
-        if (event.type === "control_request") {
-          const req = event.request || {};
-          const toolName = req.tool_name || "";
-          const requestId = event.request_id || "";
-
-          // AskUserQuestion — hold the control_request. DON'T respond.
-          // The CLI blocks waiting for our control_response.
-          // The assistant event handler already set askQuestion with the
-          // tool's id. Update it to the requestId so sendQuestionAnswer
-          // can send the control_response when the user answers.
-          if (toolName === "AskUserQuestion") {
-            const input = req.input || {};
-            updateTabLastAssistant(tabId, (msg) => ({
-              askQuestion: msg.askQuestion
-                ? { ...msg.askQuestion, id: requestId }
-                : {
-                    id: requestId,
-                    questions: input.questions || [{ question: input.question }],
-                    answers: {},
-                  },
-            }));
-            return;
-          }
-
-          // EnterPlanMode — auto-approve silently. No user gate needed.
-          if (toolName === "EnterPlanMode") {
-            transportsRef.current[tabId]?.sendPermissionResponse(requestId, "allow");
-            return;
-          }
-
-          // ExitPlanMode — show plan review UI with plan content.
-          // Claude is blocked until the user approves or rejects.
-          if (toolName === "ExitPlanMode") {
-            // Get plan content: first try the Write tool call that created
-            // the plan (the content is right there in the input), then fall
-            // back to reading from disk.
-            let planContent: string | null = null;
-            const writeCalls = ss.toolCalls.filter(
-              (t) => t.name === "Write" && t.input?.content
-            );
-            if (writeCalls.length > 0) {
-              planContent = writeCalls[writeCalls.length - 1].input.content;
-            }
-            if (!planContent) {
-              planContent = readPlanFile(options.cwd);
-            }
-
-            const allowedPrompts = req.input?.allowedPrompts || [];
-            updateTabLastAssistant(tabId, () => ({
-              planReview: {
-                requestId,
-                planContent,
-                allowedPrompts,
-              },
-            }));
-            return;
-          }
-
-          updateTabLastAssistant(tabId, () => ({
-            permissionRequest: { requestId, toolName, input: req.input },
+      if (event.type === "error") {
+        console.error("[hyo] Provider error:", event.message);
+        if (event.willRetry === undefined) return;
+        visibleProviderErrorsRef.current[tabId] = event.message;
+        surfaceProviderError(tabId, event.message, event.willRetry === false);
+        if (event.willRetry === false) {
+          lifecycle.finishTurn(tabId);
+          setState((prev) => ({
+            ...prev,
+            tabs: prev.tabs.map((tab) =>
+              tab.id === tabId ? { ...tab, generating: false } : tab,
+            ),
           }));
-          return;
         }
+        return;
+      }
 
-        // Result — turn complete. Only pick up contextWindow here; inputTokens
-        // is tracked from individual assistant events (see below) since result.usage
-        // aggregates across multiple API calls within a turn.
-        if (event.type === "result") {
-          updateTabLastAssistant(tabId, () => ({ streaming: false }));
-          const mu: any = event.modelUsage || {};
-          const firstModel: any = Object.values(mu)[0];
-          const contextWindow: number | undefined = firstModel?.contextWindow;
+      if (event.type === "closed") {
+        if (!lifecycle.releaseRuntime(lease)) return;
+        const wasGenerating = stateRef.current.tabs.find(
+          (tab) => tab.id === tabId,
+        )?.generating;
+        setState((prev) => ({
+          ...prev,
+          tabs: prev.tabs.map((tab) =>
+            tab.id === tabId ? { ...tab, generating: false } : tab,
+          ),
+        }));
+        updateTabLastAssistant(tabId, () => ({ streaming: false }));
+        if (event.exitCode !== 0 && event.exitCode !== null && wasGenerating) {
+          const providerLabel = provider.id === "claude" ? "Claude" : "Codex";
+          const errorMsg: Message = {
+            role: "assistant",
+            content: `_${providerLabel} provider exited unexpectedly (code ${event.exitCode}). Start a new conversation to continue._`,
+            thinking: "",
+            toolCalls: [],
+            orderedBlocks: [],
+            streaming: false,
+          };
           setState((prev) => ({
             ...prev,
             tabs: prev.tabs.map((tab) =>
               tab.id === tabId
-                ? {
-                    ...tab,
-                    generating: false,
-                    ...(contextWindow ? { contextWindow } : {}),
-                  }
-                : tab
+                ? { ...tab, messages: [...tab.messages, errorMsg] }
+                : tab,
             ),
           }));
+        }
+        return;
+      }
 
-          // Auto-generate title after first response
-          if (options.autoGenerateTitles) {
-            const currentTab = stateRef.current.tabs.find((t) => t.id === tabId);
-            if (currentTab && currentTab.messages.length >= 2) {
-              const firstUser = currentTab.messages.find((m) => m.role === "user" && !m.isCompaction);
-              const firstAssistant = currentTab.messages.find((m) => m.role === "assistant" && !m.isCompaction);
+      const ss = streamStatesRef.current[tabId];
+      if (!ss && event.type === "warning") {
+        const warning = createVisibleProviderWarning(event.message);
+        setState((prev) => ({
+          ...prev,
+          tabs: prev.tabs.map((tab) => tab.id === tabId
+            ? { ...tab, messages: [...tab.messages, warning] }
+            : tab),
+        }));
+        return;
+      }
+      if (!ss) return;
 
-              if (firstUser && firstAssistant) {
-                const userText =
-                  firstUser.displayText ||
-                  (typeof firstUser.content === "string" ? firstUser.content : "");
-                const truncatedTitle =
-                  userText.slice(0, 40) + (userText.length > 40 ? "..." : "");
+      if (event.type === "session_metadata") {
+        setState((prev) => ({
+          ...prev,
+          tabs: prev.tabs.map((tab) =>
+            tab.id === tabId
+              ? {
+                  ...tab,
+                  providerSessionId: event.sessionId,
+                  providerState: event.providerState ?? tab.providerState,
+                }
+              : tab,
+          ),
+        }));
+        return;
+      }
 
-                // Only generate if title hasn't been manually set
-                const needsTitle =
-                  currentTab.title === "New conversation" ||
-                  currentTab.title === truncatedTitle;
-
-                if (needsTitle && userText) {
-                  const titleBeforeGeneration = currentTab.title;
-                  const assistantText =
-                    typeof firstAssistant.content === "string"
-                      ? firstAssistant.content
-                      : "";
-
-                  console.log("[hyo][title] Generating for tab", tabId);
-
-                  generateConversationTitle({
-                    cliPath: options.cliPath,
-                    userMessage: userText,
-                    assistantMessage: assistantText,
-                  }).then((generatedTitle) => {
-                    if (!generatedTitle) {
-                      console.warn("[hyo][title] Generation returned null");
-                      return;
-                    }
-                    const tab = stateRef.current.tabs.find((t) => t.id === tabId);
-                    if (!tab || tab.title !== titleBeforeGeneration) return;
-                    console.log("[hyo][title] Renamed:", generatedTitle);
-                    renameTab(tabId, generatedTitle);
-                  }).catch((err) => {
-                    console.error("[hyo][title] Error:", err);
-                  });
+      if (event.type === "compaction_boundary") {
+        const currentTab = stateRef.current.tabs.find((t) => t.id === tabId);
+        const alreadyHasCompactionMarker = currentTab?.messages.some(
+          (message) => message.isCompaction && message.streaming,
+        );
+        if (!alreadyHasCompactionMarker) {
+          const markerMsg: Message = {
+            role: "assistant",
+            content: "compacted",
+            isCompaction: true,
+            streaming: false,
+            toolCalls: [],
+            orderedBlocks: [],
+          };
+          const continuationMsg: Message = {
+            role: "assistant",
+            content: "",
+            thinking: "",
+            toolCalls: [],
+            orderedBlocks: [],
+            streaming: true,
+          };
+          setState((prev) => ({
+            ...prev,
+            tabs: prev.tabs.map((tab) => {
+              if (tab.id !== tabId) return tab;
+              const messages = [...tab.messages];
+              for (let i = messages.length - 1; i >= 0; i--) {
+                if (messages[i].role === "assistant" && messages[i].streaming) {
+                  messages[i] = { ...messages[i], streaming: false };
+                  break;
                 }
               }
-            }
-          }
-
-          return;
+              return {
+                ...tab,
+                messages: [...messages, markerMsg, continuationMsg],
+                generating: true,
+              };
+            }),
+          }));
+          streamStatesRef.current[tabId] = {
+            toolCalls: [],
+            orderedBlocks: [],
+            turnIndex: 0,
+            toolResultSinceLastText: false,
+            skillResultPending: false,
+          };
+          const originatingRuntime = lifecycle.getRuntime(tabId);
+          const originatingTurnGeneration = turnGenerationRef.current[tabId];
+          setTimeout(() => {
+            const currentLifecycle = lifecycleRef.current;
+            if (
+              !originatingRuntime ||
+              !currentLifecycle.ownsRuntime(lease) ||
+              currentLifecycle.getRuntime(tabId) !== originatingRuntime ||
+              turnGenerationRef.current[tabId] !== originatingTurnGeneration
+            ) return;
+            originatingRuntime.send(
+              "Please continue where you left off before the compaction.",
+            );
+          }, 100);
         }
+        return;
+      }
 
-        // User event (tool results)
-        if (event.type === "user") {
-          const contentArr = event.message?.content || [];
-          processContentBlocks(contentArr, ss, "user");
-          updateTabLastAssistant(tabId, () => buildSnapshot(ss));
-          return;
-        }
-
-        // Assistant message (complete)
-        if (event.type === "assistant") {
-          // Track context window from each main-chain assistant event's usage.
-          // Each assistant API response's usage reflects the context state at that call.
-          // Skip sidechain (subagent) events to avoid out-of-order drops/spikes when
-          // parallel subagents finish.
-          const isSidechain = event.isSidechain || event.parent_tool_use_id;
-          const u = event.message?.usage;
-          if (u && !isSidechain) {
-            const total =
-              (u.input_tokens ?? 0) +
-              (u.cache_creation_input_tokens ?? 0) +
-              (u.cache_read_input_tokens ?? 0);
-            if (total > 0) {
-              setState((prev) => ({
-                ...prev,
-                tabs: prev.tabs.map((tab) =>
-                  tab.id === tabId ? { ...tab, inputTokens: total } : tab
-                ),
-              }));
-            }
-          }
-          const contentArr = event.message?.content || [];
-          processContentBlocks(contentArr, ss, "assistant");
-          updateTabLastAssistant(tabId, () => buildSnapshot(ss));
-
-          // Eagerly detect AskUserQuestion from the complete assistant event.
-          // The control_request arrives AFTER this, so set the question UI now.
-          // The control_request handler will update the id to the requestId.
-          const askTool = ss.toolCalls.find(
-            (t) => t.name === "AskUserQuestion" && !t.result && t.input?.questions
+      if (event.type === "approval_requested") {
+        if (event.autoApprove) {
+          lifecycleRef.current.getRuntime(tabId)?.respondApproval(
+            event.requestId,
+            "allow",
           );
-          if (askTool) {
-            updateTabLastAssistant(tabId, () => ({
-              askQuestion: {
-                id: askTool.id,
-                questions: askTool.input.questions,
-                answers: {},
+        } else {
+          updateTabLastAssistant(tabId, (message) => ({
+            permissionRequest: {
+              requestId: event.requestId,
+              toolName: event.toolName,
+              input: event.input,
+              approvalKind: event.approvalKind,
+              reason: event.reason,
+              availableDecisions: event.availableDecisions,
+              proposedAmendments: event.proposedAmendments,
+              grantScopes: event.grantScopes,
+            },
+            permissionRequests: [
+              ...(message.permissionRequests ?? (message.permissionRequest ? [message.permissionRequest] : [])),
+              {
+                requestId: event.requestId, toolName: event.toolName, input: event.input,
+                approvalKind: event.approvalKind, reason: event.reason,
+                availableDecisions: event.availableDecisions,
+                proposedAmendments: event.proposedAmendments, grantScopes: event.grantScopes,
               },
-            }));
-          }
-          return;
+            ],
+          }));
         }
+        return;
+      }
 
-        // Stream event (incremental deltas)
-        if (event.type === "stream_event") {
-          const evt = event.event || event;
+      if (event.type === "question_requested") {
+        updateTabLastAssistant(tabId, (message) => ({
+          askQuestion: {
+            id: event.requestId,
+            questions: event.questions,
+            answers: {},
+          },
+          askQuestions: [
+            ...(message.askQuestions ?? (message.askQuestion ? [message.askQuestion] : [])),
+            { id: event.requestId, questions: event.questions, answers: {} },
+          ],
+        }));
+        return;
+      }
 
-          if (
-            evt.type === "content_block_start" &&
-            evt.content_block?.type === "tool_use"
-          ) {
-            const tool: ToolCallData = {
-              id: evt.content_block.id,
-              name: evt.content_block.name,
-              input: {},
-              result: null,
-            };
-            if (!ss.toolCalls.find((t) => t.id === tool.id)) {
-              ss.toolCalls.push(tool);
-              ss.orderedBlocks.push({
-                type: "tool",
-                toolId: tool.id,
-                turnIndex: ss.turnIndex,
-              });
-              if (tool.name === "Skill") {
-                for (const b of ss.orderedBlocks) {
-                  if (b.type === "text" && b.turnIndex === ss.turnIndex) {
-                    b.isSkillOutput = true;
-                  }
+      if (event.type === "plan_review_requested") {
+        updateTabLastAssistant(tabId, () => ({
+          planReview: {
+            requestId: event.requestId,
+            planContent: event.planContent,
+            allowedPrompts: event.allowedPrompts,
+          },
+        }));
+        return;
+      }
+
+      if (event.type === "request_resolved") {
+        updateTabLastAssistant(tabId, (message) => ({
+          ...(message.permissionRequest?.requestId === event.requestId
+            ? {
+              permissionRequest: {
+                ...message.permissionRequest,
+                resolved: "denied" as const,
+              },
+            }
+            : {}),
+          ...(message.askQuestion?.id === event.requestId
+            ? { askQuestion: null }
+            : {}),
+          ...(message.planReview?.requestId === event.requestId
+            ? {
+              planReview: {
+                ...message.planReview,
+                resolved: "rejected" as const,
+              },
+            }
+            : {}),
+          permissionRequests: (message.permissionRequests ?? []).map((request) =>
+            request.requestId === event.requestId ? { ...request, resolved: "denied" as const } : request,
+          ),
+          askQuestions: (message.askQuestions ?? []).filter((question) => question.id !== event.requestId),
+        }));
+        return;
+      }
+
+      if (event.type === "turn_completed") {
+        if (event.error && !visibleProviderErrorsRef.current[tabId]) {
+          surfaceProviderError(tabId, event.error, true);
+        }
+        delete visibleProviderErrorsRef.current[tabId];
+        lifecycle.finishTurn(tabId);
+        updateTabLastAssistant(tabId, () => ({ streaming: false }));
+        setState((prev) => ({
+          ...prev,
+          tabs: prev.tabs.map((tab) =>
+            tab.id === tabId
+              ? {
+                  ...tab,
+                  generating: false,
+                  ...(event.contextWindow
+                    ? { contextWindow: event.contextWindow }
+                    : {}),
                 }
-              }
-              updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+              : tab,
+          ),
+        }));
+
+        if (options.autoGenerateTitles && provider.generateTitle) {
+          const currentTab = stateRef.current.tabs.find((tab) => tab.id === tabId);
+          const firstUser = currentTab?.messages.find(
+            (message) => message.role === "user" && !message.isCompaction,
+          );
+          const firstAssistant = currentTab?.messages.find(
+            (message) => message.role === "assistant" && !message.isCompaction,
+          );
+          if (currentTab && firstUser && firstAssistant) {
+            const userText = firstUser.displayText || firstUser.content;
+            const truncatedTitle =
+              userText.slice(0, 40) + (userText.length > 40 ? "..." : "");
+            const needsTitle =
+              currentTab.title === "New conversation" ||
+              currentTab.title === truncatedTitle;
+            if (needsTitle && userText) {
+              const titleBeforeGeneration = currentTab.title;
+              provider
+                .generateTitle({
+                  userMessage: userText,
+                  assistantMessage: firstAssistant.content,
+                })
+                .then((generatedTitle) => {
+                  if (!generatedTitle) return;
+                  const tab = stateRef.current.tabs.find((item) => item.id === tabId);
+                  if (!tab || tab.title !== titleBeforeGeneration) return;
+                  renameTab(tabId, generatedTitle);
+                })
+                .catch((error) => console.error("[hyo][title] Error:", error));
             }
           }
-
-          if (evt.type === "content_block_stop") {
-            const lastBlock = ss.orderedBlocks[ss.orderedBlocks.length - 1];
-            if (lastBlock?.type === "tool") {
-              ss.toolResultSinceLastText = true;
-            }
-          }
-
-          if (evt.type === "message_stop" || evt.type === "message_delta") {
-            return;
-          }
-
-          if (
-            evt.type === "content_block_delta" &&
-            evt.delta?.type === "input_json_delta"
-          ) {
-            const lastTool = ss.toolCalls[ss.toolCalls.length - 1];
-            if (lastTool) {
-              if (!lastTool._inputJson) lastTool._inputJson = "";
-              lastTool._inputJson += evt.delta.partial_json || "";
-              try {
-                lastTool.input = JSON.parse(lastTool._inputJson);
-              } catch {
-                // partial
-              }
-            }
-          }
-
-          if (evt.type === "content_block_delta") {
-            const delta = evt.delta;
-
-            if (delta?.type === "text_delta" && delta.text) {
-              if (ss.toolResultSinceLastText && ss.orderedBlocks.length > 0)
-                ss.turnIndex++;
-              const existing = ss.orderedBlocks.find(
-                (b) => b.type === "text" && b.turnIndex === ss.turnIndex
-              );
-              if (existing) {
-                existing.content = (existing.content || "") + delta.text;
-              } else {
-                ss.orderedBlocks.push({
-                  type: "text",
-                  content: delta.text,
-                  turnIndex: ss.turnIndex,
-                });
-              }
-              ss.toolResultSinceLastText = false;
-              updateTabLastAssistant(tabId, () => buildSnapshot(ss));
-            } else if (delta?.type === "thinking_delta" && delta.thinking) {
-              const existing = ss.orderedBlocks.find(
-                (b) => b.type === "thinking" && b.turnIndex === ss.turnIndex
-              );
-              if (existing) {
-                existing.content = (existing.content || "") + delta.thinking;
-              } else {
-                ss.orderedBlocks.push({
-                  type: "thinking",
-                  content: delta.thinking,
-                  turnIndex: ss.turnIndex,
-                });
-              }
-              updateTabLastAssistant(tabId, () => buildSnapshot(ss));
-            }
-          }
-          return;
         }
-      };
+        return;
+      }
+
+      if (event.type === "token_usage") {
+        setState((prev) => ({
+          ...prev,
+          tabs: prev.tabs.map((tab) =>
+            tab.id === tabId ? {
+              ...tab,
+              inputTokens: event.inputTokens,
+              ...(event.contextWindow && event.contextWindow > 0
+                ? { contextWindow: event.contextWindow }
+                : {}),
+            } : tab,
+          ),
+        }));
+        return;
+      }
+
+      if (event.type === "content_blocks") {
+        processContentBlocks(event.blocks, ss, event.source);
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "agent_message_completed") {
+        applyAgentMessageCompletion(
+          ss.orderedBlocks,
+          ss.turnIndex,
+          event.itemId,
+          event.text,
+        );
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "tool_activity") {
+        let tool = ss.toolCalls.find((item) => item.id === event.tool.id);
+        const input = event.tool.input ??
+          (event.tool.changes ? { changes: event.tool.changes } : event.tool.metadata ?? {});
+        if (!tool) {
+          tool = {
+            id: event.tool.id,
+            name: event.tool.name,
+            input,
+            result: null,
+          };
+          ss.toolCalls.push(tool);
+          ss.orderedBlocks.push({
+            type: "tool",
+            toolId: tool.id,
+            turnIndex: ss.turnIndex,
+          });
+        } else {
+          tool.name = event.tool.name || tool.name;
+          if (event.tool.input !== undefined || event.tool.changes || event.tool.metadata) {
+            tool.input = input;
+          }
+        }
+        if (event.tool.outputDelta) {
+          tool.result = `${tool.result ?? ""}${event.tool.outputDelta}`;
+        }
+        if (event.tool.output !== undefined) {
+          tool.result = serializeProviderValue(event.tool.output);
+        } else if (event.phase === "completed" && !event.tool.outputDelta) {
+          tool.result = event.tool.status || "completed";
+        }
+        if (event.phase === "completed") ss.toolResultSinceLastText = true;
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "subagent_activity" || event.type === "subagent_status") {
+        const name = event.type === "subagent_activity"
+          ? event.operation
+          : `subagent_${event.activity}`;
+        const input = event.type === "subagent_activity"
+          ? {
+              prompt: event.prompt,
+              senderThreadId: event.senderThreadId,
+              receiverThreadIds: event.receiverThreadIds,
+              newThreadIds: event.newThreadIds,
+            }
+          : { agentThreadId: event.agentThreadId, agentPath: event.agentPath };
+        const result = event.type === "subagent_activity"
+          ? serializeProviderValue({ status: event.status, agents: event.agents })
+          : serializeProviderValue({ phase: event.phase });
+        const existing = ss.toolCalls.find((item) => item.id === event.id);
+        if (existing) {
+          existing.name = name;
+          existing.input = input;
+          existing.result = event.phase === "completed" ? result : existing.result;
+        } else {
+          ss.toolCalls.push({
+            id: event.id,
+            name,
+            input,
+            result: event.phase === "completed" ? result : null,
+          });
+          ss.orderedBlocks.push({
+            type: "tool",
+            toolId: event.id,
+            turnIndex: ss.turnIndex,
+          });
+        }
+        if (event.phase === "completed") ss.toolResultSinceLastText = true;
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "tool_started") {
+        const tool: ToolCallData = { ...event.tool, result: null };
+        if (!ss.toolCalls.find((item) => item.id === tool.id)) {
+          ss.toolCalls.push(tool);
+          ss.orderedBlocks.push({
+            type: "tool",
+            toolId: tool.id,
+            turnIndex: ss.turnIndex,
+          });
+          if (tool.name === "Skill") {
+            for (const block of ss.orderedBlocks) {
+              if (block.type === "text" && block.turnIndex === ss.turnIndex) {
+                block.isSkillOutput = true;
+              }
+            }
+          }
+          updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        }
+        return;
+      }
+
+      if (event.type === "tool_input_delta") {
+        const lastTool = ss.toolCalls[ss.toolCalls.length - 1];
+        if (lastTool) {
+          lastTool._inputJson = (lastTool._inputJson || "") + event.delta;
+          try {
+            lastTool.input = JSON.parse(lastTool._inputJson);
+          } catch {
+            // Partial JSON is expected while the provider is streaming.
+          }
+        }
+        return;
+      }
+
+      if (event.type === "tool_stopped") {
+        const lastBlock = ss.orderedBlocks[ss.orderedBlocks.length - 1];
+        if (lastBlock?.type === "tool") ss.toolResultSinceLastText = true;
+        return;
+      }
+
+      if (event.type === "text_delta") {
+        if (ss.toolResultSinceLastText && ss.orderedBlocks.length > 0) {
+          ss.turnIndex++;
+        }
+        applyProviderTextDelta(
+          ss.orderedBlocks,
+          ss.turnIndex,
+          event.itemId,
+          event.delta,
+        );
+        ss.toolResultSinceLastText = false;
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "thinking_delta") {
+        const existing = ss.orderedBlocks.find(
+          (block) =>
+            block.type === "thinking" && (event.itemId ? block.providerItemId === event.itemId : block.turnIndex === ss.turnIndex),
+        );
+        if (existing) existing.content = (existing.content || "") + event.delta;
+        else {
+          ss.orderedBlocks.push({
+            type: "thinking",
+            content: event.delta,
+            turnIndex: ss.turnIndex,
+            ...(event.itemId ? { providerItemId: event.itemId } : {}),
+          });
+        }
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "reasoning_completed") {
+        applyReasoningCompletion(ss.orderedBlocks, ss.turnIndex, event.itemId, event.summary, event.content);
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "plan_delta") {
+        applyPlanDelta(ss.orderedBlocks, ss.turnIndex, event.itemId, event.delta);
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "plan_updated") {
+        applyPlanUpdate(ss.orderedBlocks, ss.turnIndex, event);
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "review_mode_changed") {
+        const content = event.active
+          ? `### Review mode\n\nStarted review: ${event.review || "Review"}`
+          : `### Review mode\n\nReview completed${event.review ? `: ${event.review}` : ""}`;
+        const id = `review:${event.itemId}`;
+        const existing = ss.orderedBlocks.find((block) => block.providerItemId === id);
+        if (existing) existing.content = content;
+        else ss.orderedBlocks.push({ type: "text", content, turnIndex: ss.turnIndex, providerItemId: id });
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "warning") {
+        const warning = createVisibleProviderWarning(event.message);
+        ss.orderedBlocks.push({ ...warning.orderedBlocks![0], turnIndex: ss.turnIndex });
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
     },
-    [updateTabLastAssistant]
+    [
+      options.autoGenerateTitles,
+      surfaceProviderError,
+      updateTabLastAssistant,
+    ],
   );
 
   // ------- tab management -------
 
   const newTab = useCallback(() => {
     const id = genId();
+    const providerDefaults = providerDefaultsFor(options, defaultProviderId);
     setState((prev) => {
-      const activeTab = prev.tabs.find((t) => t.id === prev.activeTabId);
       return {
         tabs: [
           ...prev.tabs,
           {
             id,
-            cliSessionId: null,
+            providerId: defaultProviderId,
+            providerSessionId: null,
+            providerState: null,
+            runtimeConfiguration: {
+              cwd: options.cwd,
+              maxOutputTokens: options.maxOutputTokens,
+            },
             title: "New conversation",
             messages: [],
             generating: false,
-            model: activeTab?.model || options.model,
-            permissionMode: activeTab?.permissionMode || options.permissionMode,
+            ...providerDefaults,
+            permissionMode: options.permissionMode,
             agent: options.defaultAgent,
+            inputTokens: 0,
             voiceMode: false,
           },
         ],
         activeTabId: id,
       };
     });
-  }, [options.model, options.permissionMode]);
+  }, [defaultProviderId, options.cwd, options.defaultAgent, options.maxOutputTokens, options.model, options.permissionMode, options.providerDefaults]);
 
   const closeTab = useCallback((tabIdToClose: string) => {
-    transportsRef.current[tabIdToClose]?.stop();
-    delete transportsRef.current[tabIdToClose];
+    lifecycleRef.current.cleanupRuntime(tabIdToClose);
     delete streamStatesRef.current[tabIdToClose];
 
     setState((prev) => {
@@ -673,17 +986,25 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       if (remaining.length === 0) {
         const newId = genId();
+        const providerDefaults = providerDefaultsFor(options, defaultProviderId);
         return {
           tabs: [
             {
               id: newId,
-              cliSessionId: null,
+              providerId: defaultProviderId,
+              providerSessionId: null,
+              providerState: null,
+              runtimeConfiguration: {
+                cwd: options.cwd,
+                maxOutputTokens: options.maxOutputTokens,
+              },
               title: "New conversation",
               messages: [],
               generating: false,
-              model: options.model,
+              ...providerDefaults,
               permissionMode: options.permissionMode,
               agent: options.defaultAgent,
+              inputTokens: 0,
               voiceMode: false,
             },
           ],
@@ -700,7 +1021,7 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       return { tabs: remaining, activeTabId };
     });
-  }, []);
+  }, [defaultProviderId, options.cwd, options.defaultAgent, options.maxOutputTokens, options.model, options.permissionMode, options.providerDefaults]);
 
   const switchTab = useCallback((id: string) => {
     setState((prev) => ({ ...prev, activeTabId: id }));
@@ -708,23 +1029,23 @@ export function useSessionManager(options: SessionManagerOptions) {
   }, []);
 
   const renameTab = useCallback((id: string, title: string) => {
-    setState((prev) => {
-      const tab = prev.tabs.find((t) => t.id === id);
-
-      // If this tab has a persisted session, save the custom title and refresh dropdown
-      if (tab?.cliSessionId) {
-        saveCustomTitle(options.cwd, tab.cliSessionId, title);
-        // Refresh past sessions to update dropdown
-        setTimeout(() => refreshPastSessions(), 0);
-      }
-
-      return {
-        ...prev,
-        tabs: prev.tabs.map((t) =>
-          t.id === id ? { ...t, title } : t
-        ),
-      };
-    });
+    const tab = stateRef.current.tabs.find((item) => item.id === id);
+    if (tab?.providerSessionId) {
+      const provider = resolveProvider(tab.providerId);
+      const cwd = tab.runtimeConfiguration?.cwd ?? options.cwd;
+      void provider
+        .renameSession(cwd, tab.providerSessionId, title)
+        .then(() => refreshPastSessions(tab.providerId))
+        .catch((error) => {
+          console.error("[hyo] Failed to rename session:", error);
+        });
+    }
+    setState((prev) => ({
+      ...prev,
+      tabs: prev.tabs.map((item) =>
+        item.id === id ? { ...item, title } : item
+      ),
+    }));
   }, [options.cwd]); // refreshPastSessions intentionally omitted — declared later, referenced via closure
 
   // ------- messaging -------
@@ -732,6 +1053,14 @@ export function useSessionManager(options: SessionManagerOptions) {
   const sendMessage = useCallback(
     (content: string | any[], meta?: { displayText?: string; attachedFileNames?: string[]; isCompaction?: boolean }) => {
       const tabId = stateRef.current.activeTabId;
+      const owningTab = stateRef.current.tabs.find((tab) => tab.id === tabId);
+      if (!owningTab) return false;
+      const provider = resolveProvider(owningTab.providerId);
+      const lifecycle = lifecycleRef.current;
+      if (!lifecycle.beginTurn(tabId)) return false;
+      turnGenerationRef.current[tabId] =
+        (turnGenerationRef.current[tabId] ?? 0) + 1;
+      delete visibleProviderErrorsRef.current[tabId];
 
       // For display, use the typed text; for arrays (image messages) use displayText or placeholder
       const displayContent = typeof content === "string"
@@ -774,8 +1103,23 @@ export function useSessionManager(options: SessionManagerOptions) {
               : tab.title;
           // Compaction: don't add a user message — just the streaming assistant marker
           const newMessages = meta?.isCompaction
-            ? [...tab.messages, assistantMsg]
-            : [...tab.messages, userMsg, assistantMsg];
+            ? [
+                ...tab.messages.map((message) =>
+                  message.role === "assistant" && message.streaming
+                    ? { ...message, streaming: false }
+                    : message,
+                ),
+                assistantMsg,
+              ]
+            : [
+                ...tab.messages.map((message) =>
+                  message.role === "assistant" && message.streaming
+                    ? { ...message, streaming: false }
+                    : message,
+                ),
+                userMsg,
+                assistantMsg,
+              ];
           return {
             ...tab,
             title,
@@ -786,84 +1130,98 @@ export function useSessionManager(options: SessionManagerOptions) {
       }));
       scrollRef.current.nearBottom = true;
 
-      if (
-        !transportsRef.current[tabId] ||
-        !transportsRef.current[tabId].isRunning()
-      ) {
-        const currentTab = stateRef.current.tabs.find(
-          (t) => t.id === tabId
-        );
-        const cliSessionId = currentTab?.cliSessionId;
-
-        const transport = new ClaudeTransport({
-          cliPath: options.cliPath,
-          cwd: options.cwd,
-          model: currentTab?.model || options.model,
+      let runtime = lifecycle.getRuntime(tabId);
+      if (runtime && !runtime.isRunning()) runtime = undefined;
+      if (!runtime) {
+        const currentTab = stateRef.current.tabs.find((tab) => tab.id === tabId);
+        const providerSessionId = currentTab?.providerSessionId;
+        let dispatchEvent: (event: ProviderEvent) => void = () => {};
+        runtime = provider.createRuntime({
+          cwd: currentTab?.runtimeConfiguration?.cwd ?? options.cwd,
+          model: currentTab?.model ?? providerDefaultsFor(options, owningTab.providerId).model,
+          reasoningEffort: currentTab?.reasoningEffort,
+          approvalPolicy: currentTab?.approvalPolicy,
+          sandboxMode: currentTab?.sandboxMode,
+          networkAccess: currentTab?.networkAccess,
           permissionMode: currentTab?.permissionMode || options.permissionMode,
           agent: currentTab?.agent || "",
-          sessionId: cliSessionId || undefined,
-          resume: !!cliSessionId,
-          maxOutputTokens: options.maxOutputTokens,
-          onMessage: makeProcessEvent(tabId),
-          onError: (error) => console.error("[hyo] CLI error:", error),
-          onClose: (code) => {
-            const wasGenerating = stateRef.current.tabs.find(
-              (t) => t.id === tabId
-            )?.generating;
-            setState((prev) => ({
-              ...prev,
-              tabs: prev.tabs.map((tab) =>
-                tab.id === tabId ? { ...tab, generating: false } : tab
-              ),
-            }));
-            updateTabLastAssistant(tabId, () => ({ streaming: false }));
-            // If process exited with error while generating, show error message
-            if (code !== 0 && code !== null && wasGenerating) {
-              const errorMsg: Message = {
-                role: "assistant",
-                content: `_Claude process exited unexpectedly (code ${code}). Start a new conversation to continue._`,
-                thinking: "",
-                toolCalls: [],
-                orderedBlocks: [],
-                streaming: false,
-              };
-              setState((prev) => ({
-                ...prev,
-                tabs: prev.tabs.map((tab) =>
-                  tab.id === tabId
-                    ? { ...tab, messages: [...tab.messages, errorMsg] }
-                    : tab
-                ),
-              }));
-            }
-            delete transportsRef.current[tabId];
-          },
+          providerSessionId: providerSessionId || undefined,
+          providerState: currentTab?.providerState,
+          resume: !!providerSessionId,
+          maxOutputTokens: currentTab?.runtimeConfiguration
+            ? currentTab.runtimeConfiguration.maxOutputTokens
+            : options.maxOutputTokens,
+          onEvent: (event) => dispatchEvent(event),
         });
-        transport.spawn();
-        transportsRef.current[tabId] = transport;
+        const lease = lifecycle.attachRuntime(tabId, runtime);
+        dispatchEvent = makeProcessEvent(tabId, lease, provider);
+        try {
+          runtime.start();
+        } catch (error) {
+          lifecycle.cleanupRuntime(tabId);
+          throw error;
+        }
       }
 
-      transportsRef.current[tabId].sendUserMessage(content);
+      try {
+        if (meta?.isCompaction) runtime.compact();
+        else runtime.send(content);
+      } catch (error) {
+        lifecycle.finishTurn(tabId);
+        throw error;
+      }
+      return true;
     },
-    [options, makeProcessEvent, updateTabLastAssistant]
+    [options, makeProcessEvent]
   );
 
   const sendPermissionResponse = useCallback(
-    (requestId: string, behavior: "allow" | "allow_always" | "deny") => {
+    (requestId: string, requested: ProviderApprovalSelection | "allow" | "allow_always" | "deny") => {
+      const hasStructuredSelection = typeof requested !== "string";
+      const selection: ProviderApprovalSelection = typeof requested === "string"
+        ? { decision: requested === "allow_always" ? "allow_session" : requested }
+        : requested;
       const tabId = stateRef.current.activeTabId;
       // Look up the toolName from the pending permission request so the
       // transport can build the correct updatedPermissions for "always allow".
       const tab = stateRef.current.tabs.find((t) => t.id === tabId);
-      const lastMsg = tab?.messages[tab.messages.length - 1];
-      const toolName = lastMsg?.permissionRequest?.toolName;
-      transportsRef.current[tabId]?.sendPermissionResponse(requestId, behavior, toolName);
+      const lastMsg = [...(tab?.messages ?? [])].reverse().find((message) =>
+        message.role === "assistant" && (
+          message.permissionRequest?.requestId === requestId ||
+          message.permissionRequests?.some((request) => request.requestId === requestId) ||
+          message.planReview?.requestId === requestId
+        ),
+      );
+      const matchedRequest = lastMsg?.permissionRequests?.find((request) => request.requestId === requestId)
+        ?? (lastMsg?.permissionRequest?.requestId === requestId ? lastMsg.permissionRequest : undefined);
+      const permissionMatches = !!matchedRequest && !matchedRequest.resolved;
+      const planMatches =
+        lastMsg?.planReview?.requestId === requestId &&
+        !lastMsg.planReview.resolved;
+      if (!permissionMatches && !planMatches) return;
+      const toolName = matchedRequest?.toolName;
+      const behavior = selection.decision === "allow_session" || (selection.decision === "permissions" && selection.scope === "session")
+        ? "allow_always" : selection.decision === "deny" || selection.decision === "cancel" || (selection.decision === "permissions" && Object.keys(selection.permissions).length === 0)
+          ? "deny" : "allow";
+      lifecycleRef.current.getRuntime(tabId)?.respondApproval(
+        requestId,
+        behavior,
+        toolName,
+        undefined,
+        hasStructuredSelection ? selection : undefined,
+      );
       updateTabLastAssistant(tabId, (msg) => {
         const updates: Partial<Message> = {};
-        if (msg.permissionRequest) {
+        if (msg.permissionRequest?.requestId === requestId) {
           updates.permissionRequest = {
             ...msg.permissionRequest,
             resolved: behavior === "deny" ? ("denied" as const) : ("allowed" as const),
           };
+        }
+        if (msg.permissionRequests?.some((request) => request.requestId === requestId)) {
+          updates.permissionRequests = msg.permissionRequests.map((request) => request.requestId === requestId
+            ? { ...request, resolved: behavior === "deny" ? "denied" as const : "allowed" as const }
+            : request);
         }
         // Also resolve planReview if this requestId matches
         if (msg.planReview && msg.planReview.requestId === requestId) {
@@ -889,29 +1247,39 @@ export function useSessionManager(options: SessionManagerOptions) {
       const tab = stateRef.current.tabs.find((t) => t.id === tabId);
       const lastAssistant = [...(tab?.messages || [])]
         .reverse()
-        .find((m) => m.role === "assistant");
-      const questions = lastAssistant?.askQuestion?.questions || [];
+        .find((m) => m.role === "assistant" && (m.askQuestion?.id === questionId || m.askQuestions?.some((q) => q.id === questionId)));
+      const matchedQuestion = lastAssistant?.askQuestions?.find((q) => q.id === questionId)
+        ?? (lastAssistant?.askQuestion?.id === questionId ? lastAssistant.askQuestion : undefined);
+      if (!matchedQuestion) return;
+      const questions = matchedQuestion.questions;
 
       // Send control_response with questions + answers as updatedInput.
       // The CLI was blocked on the control_request — this unblocks it.
       // Claude receives the answers and continues within the same turn.
-      transportsRef.current[tabId]?.sendPermissionResponse(
+      lifecycleRef.current.getRuntime(tabId)?.respondQuestion(
         questionId,
-        "allow",
-        undefined,
-        { questions, answers }
+        questions,
+        answers,
       );
 
       // Clear the question UI. The assistant message stays streaming —
       // Claude will continue and the result event will finalize it.
-      updateTabLastAssistant(tabId, () => ({ askQuestion: null }));
+      updateTabLastAssistant(tabId, (message) => ({
+        ...(message.askQuestion?.id === questionId ? { askQuestion: null } : {}),
+        askQuestions: (message.askQuestions ?? []).filter((question) => question.id !== questionId),
+      }));
     },
     [updateTabLastAssistant]
   );
 
   const stopGeneration = useCallback(() => {
     const tabId = stateRef.current.activeTabId;
-    transportsRef.current[tabId]?.sendInterrupt();
+    const runtime = lifecycleRef.current.getRuntime(tabId);
+    try {
+      runtime?.interrupt();
+    } finally {
+      lifecycleRef.current.cleanupRuntime(tabId);
+    }
     setState((prev) => ({
       ...prev,
       tabs: prev.tabs.map((tab) =>
@@ -921,15 +1289,55 @@ export function useSessionManager(options: SessionManagerOptions) {
     updateTabLastAssistant(tabId, () => ({ streaming: false }));
   }, [updateTabLastAssistant]);
 
-  const setTabModel = useCallback((model: string) => {
-    const normalized = normalizeModelId(model);
+  const setTabProviderOptions = useCallback((updates: Partial<ProviderSessionOptions>) => {
+    const tabId = stateRef.current.activeTabId;
+    lifecycleRef.current.cleanupRuntime(tabId);
+    delete streamStatesRef.current[tabId];
     setState((prev) => ({
       ...prev,
-      tabs: prev.tabs.map((tab) =>
-        tab.id === prev.activeTabId ? { ...tab, model: normalized } : tab
-      ),
+      tabs: prev.tabs.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        const provider = resolveProvider(tab.providerId);
+        return {
+          ...tab,
+          ...updates,
+          generating: false,
+          messages: tab.messages.map((message) =>
+            message.role === "assistant" && message.streaming
+              ? { ...message, streaming: false }
+              : message,
+          ),
+          ...(updates.model
+            ? { model: provider.normalizeModelId?.(updates.model) ?? updates.model }
+            : {}),
+        };
+      }),
     }));
   }, []);
+
+  const setTabModel = useCallback((model: string) => {
+    setTabProviderOptions({ model });
+  }, [setTabProviderOptions]);
+
+  const setTabReasoningEffort = useCallback((reasoningEffort?: string) => {
+    setTabProviderOptions({ reasoningEffort });
+  }, [setTabProviderOptions]);
+
+  const setTabApprovalPolicy = useCallback((
+    approvalPolicy?: ProviderSessionOptions["approvalPolicy"],
+  ) => {
+    setTabProviderOptions({ approvalPolicy });
+  }, [setTabProviderOptions]);
+
+  const setTabSandboxMode = useCallback((
+    sandboxMode?: ProviderSessionOptions["sandboxMode"],
+  ) => {
+    setTabProviderOptions({ sandboxMode });
+  }, [setTabProviderOptions]);
+
+  const setTabNetworkAccess = useCallback((networkAccess?: boolean) => {
+    setTabProviderOptions({ networkAccess });
+  }, [setTabProviderOptions]);
 
   const setTabPermissionMode = useCallback((permissionMode: string) => {
     setState((prev) => ({
@@ -956,13 +1364,14 @@ export function useSessionManager(options: SessionManagerOptions) {
     // Next sendMessage will respawn with the new --agent flag.
     setState((prev) => {
       const tabId = prev.activeTabId;
-      transportsRef.current[tabId]?.stop();
-      delete transportsRef.current[tabId];
+      lifecycleRef.current.cleanupRuntime(tabId);
       delete streamStatesRef.current[tabId];
       return {
         ...prev,
         tabs: prev.tabs.map((tab) =>
-          tab.id === tabId ? { ...tab, agent, cliSessionId: null } : tab
+          tab.id === tabId
+            ? { ...tab, agent, providerSessionId: null, providerState: null }
+            : tab
         ),
       };
     });
@@ -970,30 +1379,131 @@ export function useSessionManager(options: SessionManagerOptions) {
 
   // ------- past sessions -------
 
-  const refreshPastSessions = useCallback(() => {
+  const activeProviderIdForHistory =
+    state.tabs.find((tab) => tab.id === state.activeTabId)?.providerId ??
+    defaultProviderId;
+
+  const refreshPastSessions = useCallback(async (requestedProviderId?: ProviderId) => {
+    const activeProviderId =
+      stateRef.current.tabs.find((tab) => tab.id === stateRef.current.activeTabId)?.providerId ??
+      defaultProviderId;
+    const providerId = requestedProviderId ?? activeProviderId;
+    if (providerId !== activeProviderId) return;
+    const provider = resolveProvider(providerId);
+    const request = ++historyRequestRef.current;
     try {
-      const sessions = listPastSessions(options.cwd);
-      setPastSessions(sessions);
+      const sessions = await provider.listSessions(options.cwd);
+      const currentActiveProviderId = stateRef.current.tabs.find(
+        (tab) => tab.id === stateRef.current.activeTabId,
+      )?.providerId;
+      if (
+        !mountedRef.current ||
+        request !== historyRequestRef.current ||
+        currentActiveProviderId !== providerId ||
+        latestProvidersRef.current.get(providerId) !== provider
+      ) return;
+      if (sessions.length === 0 && pastSessionsRef.current.length === 0) return;
+      const nextSessions = sessions.map((session) => ({ ...session, providerId }));
+      setPastSessions((prev) => {
+        const latestActiveProviderId = stateRef.current.tabs.find(
+          (tab) => tab.id === stateRef.current.activeTabId,
+        )?.providerId;
+        if (
+          !mountedRef.current ||
+          request !== historyRequestRef.current ||
+          latestActiveProviderId !== providerId ||
+          latestProvidersRef.current.get(providerId) !== provider
+        ) return prev;
+        return nextSessions;
+      });
     } catch (e) {
-      console.error("[hyo] Failed to list past sessions:", e);
+      if (mountedRef.current && latestProvidersRef.current.get(providerId) === provider) {
+        console.error("[hyo] Failed to list past sessions:", e);
+      }
     }
-  }, [options.cwd]);
+  }, [defaultProviderId, options.cwd]);
 
   useEffect(() => {
-    refreshPastSessions();
-  }, [refreshPastSessions]);
+    if (pastSessionsRef.current.length > 0) {
+      pastSessionsRef.current = [];
+      setPastSessions([]);
+    }
+    void refreshPastSessions();
+  }, [activeProviderIdForHistory, defaultProviderId, refreshPastSessions, registry]);
 
-  const openPastSession = useCallback((pastSession: PastSession) => {
+  const openPastSession = useCallback(async (pastSession: PastSession) => {
     const existing = stateRef.current.tabs.find(
-      (t) => t.cliSessionId === pastSession.id
+      (tab) =>
+        tab.providerId === pastSession.providerId &&
+        tab.providerSessionId === pastSession.id,
     );
     if (existing) {
+      openIntentRef.current++;
       setState((prev) => ({ ...prev, activeTabId: existing.id }));
       return;
     }
 
-    // Load conversation history from JSONL
-    const history = loadSessionHistory(options.cwd, pastSession.id);
+    const provider = resolveProvider(pastSession.providerId);
+    const providerOpenings = openingSessionsRef.current.get(provider) ?? new Set<string>();
+    openingSessionsRef.current.set(provider, providerOpenings);
+    const openingKey = `${pastSession.providerId}\u0000${pastSession.id}`;
+    if (providerOpenings.has(openingKey)) return;
+    providerOpenings.add(openingKey);
+
+    const openIntent = ++openIntentRef.current;
+    const activeTabIdAtStart = stateRef.current.activeTabId;
+    const activeProviderIdAtStart = stateRef.current.tabs.find(
+      (tab) => tab.id === activeTabIdAtStart,
+    )?.providerId;
+    const defaultProviderIdAtStart = defaultProviderId;
+    let history: ProviderHistoryMessage[];
+    try {
+      history = await provider.loadSession(options.cwd, pastSession.id);
+    } catch (error) {
+      if (mountedRef.current && openIntent === openIntentRef.current) {
+        console.error("[hyo] Failed to load session:", error);
+      }
+      return;
+    } finally {
+      providerOpenings.delete(openingKey);
+    }
+    const activeProviderId = stateRef.current.tabs.find(
+      (tab) => tab.id === stateRef.current.activeTabId,
+    )?.providerId;
+    if (
+      !mountedRef.current ||
+      openIntent !== openIntentRef.current ||
+      latestProvidersRef.current.get(pastSession.providerId) !== provider ||
+      stateRef.current.activeTabId !== activeTabIdAtStart ||
+      activeProviderId !== activeProviderIdAtStart ||
+      defaultProviderIdRef.current !== defaultProviderIdAtStart
+    ) return;
+    const openedWhileLoading = stateRef.current.tabs.find(
+      (tab) =>
+        tab.providerId === pastSession.providerId &&
+        tab.providerSessionId === pastSession.id,
+    );
+    if (openedWhileLoading) {
+      setState((prev) => {
+        const activeTab = prev.tabs.find((tab) => tab.id === prev.activeTabId);
+        const existingTab = prev.tabs.find(
+          (tab) =>
+            tab.providerId === pastSession.providerId &&
+            tab.providerSessionId === pastSession.id,
+        );
+        if (
+          !mountedRef.current ||
+          openIntent !== openIntentRef.current ||
+          latestProvidersRef.current.get(pastSession.providerId) !== provider ||
+          prev.activeTabId !== activeTabIdAtStart ||
+          activeTab?.providerId !== activeProviderIdAtStart ||
+          defaultProviderIdRef.current !== defaultProviderIdAtStart ||
+          !existingTab
+        ) return prev;
+        return { ...prev, activeTabId: existingTab.id };
+      });
+      return;
+    }
     const messages: Message[] = history.map((m) => ({
       role: m.role,
       content: m.content,
@@ -1004,30 +1514,52 @@ export function useSessionManager(options: SessionManagerOptions) {
     }));
 
     const id = genId();
+    const providerDefaults = providerDefaultsFor(options, pastSession.providerId);
     setState((prev) => {
-      const activeTab = prev.tabs.find((t) => t.id === prev.activeTabId);
+      const currentActiveTab = prev.tabs.find((tab) => tab.id === prev.activeTabId);
+      if (
+        !mountedRef.current ||
+        openIntent !== openIntentRef.current ||
+        latestProvidersRef.current.get(pastSession.providerId) !== provider ||
+        prev.activeTabId !== activeTabIdAtStart ||
+        currentActiveTab?.providerId !== activeProviderIdAtStart ||
+        defaultProviderIdRef.current !== defaultProviderIdAtStart
+      ) return prev;
+      const existingTab = prev.tabs.find(
+        (tab) =>
+          tab.providerId === pastSession.providerId &&
+          tab.providerSessionId === pastSession.id,
+      );
+      if (existingTab) return { ...prev, activeTabId: existingTab.id };
       return {
         tabs: [
           ...prev.tabs,
           {
             id,
-            cliSessionId: pastSession.id,
+            providerId: pastSession.providerId,
+            providerSessionId: pastSession.id,
+            providerState: pastSession.providerState ?? null,
+            runtimeConfiguration: {
+              cwd: options.cwd,
+              maxOutputTokens: options.maxOutputTokens,
+            },
             title: pastSession.title,
             messages,
             generating: false,
-            model: activeTab?.model || options.model,
-            permissionMode: activeTab?.permissionMode || options.permissionMode,
+            ...providerDefaults,
+            permissionMode: options.permissionMode,
             agent: options.defaultAgent,
+            inputTokens: 0,
             voiceMode: false,
           },
         ],
         activeTabId: id,
       };
     });
-  }, [options.cwd, options.model, options.permissionMode, options.defaultAgent]);
+  }, [defaultProviderId, options.cwd, options.maxOutputTokens, options.model, options.permissionMode, options.defaultAgent, options.providerDefaults]);
 
   const compact = useCallback(() => {
-    sendMessage("/compact", { isCompaction: true });
+    return sendMessage("/compact", { isCompaction: true });
   }, [sendMessage]);
 
   // Recover a session that's been poisoned by an orphaned `thinking` block
@@ -1037,9 +1569,9 @@ export function useSessionManager(options: SessionManagerOptions) {
   // with `--resume` against the cleaned file. Returns the user's last
   // attempted message text so the UI can prefill the input.
   const recoverSession = useCallback(
-    (tabId: string): RepairResult => {
+    async (tabId: string): Promise<ProviderRecoveryResult> => {
       const tab = stateRef.current.tabs.find((t) => t.id === tabId);
-      if (!tab?.cliSessionId) {
+      if (!tab?.providerSessionId) {
         return {
           success: false,
           linesRemoved: 0,
@@ -1048,19 +1580,20 @@ export function useSessionManager(options: SessionManagerOptions) {
         };
       }
 
-      const projectDir = getProjectDir(options.cwd);
-      const jsonlPath = path.join(projectDir, `${tab.cliSessionId}.jsonl`);
-      const result = repairSession(jsonlPath);
+      const provider = resolveProvider(tab.providerId);
+      const result = await provider.recoverSession(
+        tab.runtimeConfiguration?.cwd ?? options.cwd,
+        tab.providerSessionId,
+      );
       if (!result.success) return result;
 
       // Kill the existing transport so the next sendMessage spawns a fresh
       // process that --resumes against the cleaned file.
-      const existing = transportsRef.current[tabId];
+      const existing = lifecycleRef.current.getRuntime(tabId);
       if (existing) {
         try {
-          existing.stop();
+          lifecycleRef.current.cleanupRuntime(tabId);
         } catch {}
-        delete transportsRef.current[tabId];
       }
 
       // Strip the corrupt trailing messages from the in-memory state so the
@@ -1078,12 +1611,14 @@ export function useSessionManager(options: SessionManagerOptions) {
             const isApiError =
               last.role === "assistant" &&
               (text.startsWith("API Error") ||
-                isThinkingBlockApiError(text));
+                provider.isRecoverableError?.(text));
             const isFailedUserRetry =
               last.role === "user" &&
               msgs.length >= 2 &&
               ((msgs[msgs.length - 2].content || "").startsWith("API Error") ||
-                isThinkingBlockApiError(msgs[msgs.length - 2].content || ""));
+                provider.isRecoverableError?.(
+                  msgs[msgs.length - 2].content || "",
+                ));
             if (isApiError || isFailedUserRetry) {
               msgs.pop();
             } else {
@@ -1102,24 +1637,51 @@ export function useSessionManager(options: SessionManagerOptions) {
   // ------- return -------
 
   const activeTab = state.tabs.find((t) => t.id === state.activeTabId);
+  const activeProvider = effectiveProviderMap.get(
+    activeTab?.providerId ?? defaultProviderId,
+  );
+  if (!activeProvider) {
+    throw new Error(
+      `Provider "${activeTab?.providerId ?? defaultProviderId}" is not registered`,
+    );
+  }
 
   return {
     tabs: state.tabs,
     activeTabId: state.activeTabId,
     activeMessages: activeTab?.messages || [],
     activeGenerating: activeTab?.generating || false,
-    activeModel: activeTab?.model || options.model,
+    activeModel:
+      activeTab?.model ??
+      providerDefaultsFor(options, activeTab?.providerId ?? defaultProviderId).model,
     activePermissionMode: activeTab?.permissionMode || options.permissionMode,
     activeAgent: activeTab?.agent || "",
     activeVoiceMode: activeTab?.voiceMode || false,
-    activeTabHasSession: !!activeTab?.cliSessionId,
+    activeTabHasSession: !!activeTab?.providerSessionId,
     activeInputTokens: activeTab?.inputTokens || 0,
     activeContextWindow: activeTab?.contextWindow,
+    activeProviderId: activeProvider.id,
+    activeProvider,
+    activeProviderCapabilities: activeProvider.capabilities,
+    activeProviderOptions: {
+      model:
+        activeTab?.model ??
+        providerDefaultsFor(options, activeTab?.providerId ?? defaultProviderId).model,
+      reasoningEffort: activeTab?.reasoningEffort,
+      approvalPolicy: activeTab?.approvalPolicy,
+      sandboxMode: activeTab?.sandboxMode,
+      networkAccess: activeTab?.networkAccess,
+    } satisfies ProviderSessionOptions,
     newTab,
     closeTab,
     switchTab,
     renameTab,
     setTabModel,
+    setTabProviderOptions,
+    setTabReasoningEffort,
+    setTabApprovalPolicy,
+    setTabSandboxMode,
+    setTabNetworkAccess,
     setTabPermissionMode,
     setTabAgent,
     toggleVoiceMode,

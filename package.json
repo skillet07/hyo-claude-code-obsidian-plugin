@@ -1,12 +1,20 @@
 {
   "name": "obsidian-hyo-plugin",
-  "version": "0.3.0",
-  "description": "Chat with Claude Code inside your Obsidian vault",
+  "version": "0.4.0",
+  "description": "Chat with Claude Code and Codex inside your Obsidian vault",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",
-    "release": "node esbuild.config.mjs production && echo '✓ Built. Now run: gh release create VERSION main.js manifest.json styles.css --title TITLE --notes NOTES'"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "codex:generate-types": "node scripts/generate-codex-types.mjs",
+    "codex:check-types": "node scripts/check-codex-types.mjs",
+    "smoke:codex": "node scripts/smoke-codex.mjs",
+    "diff:check": "git diff --check",
+    "verify": "npm run typecheck && npm test && npm run codex:check-types && npm run build && npm run diff:check",
+    "release": "npm run verify && echo '✓ Verified and built. Now run: gh release create VERSION main.js manifest.json styles.css --title TITLE --notes NOTES'"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
@@ -17,8 +25,11 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
+    "@types/react-test-renderer": "^19.1.0",
     "esbuild": "^0.25.0",
     "obsidian": "latest",
-    "typescript": "^5.8.0"
+    "react-test-renderer": "^19.1.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.10"
   }
 }

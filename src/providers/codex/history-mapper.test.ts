@@ -1,0 +1,151 @@
+import { describe, expect, it } from "vitest";
+import { mapThreadHistory, mapThreadSummary } from "./history-mapper";
+
+describe("Codex history mapping", () => {
+  it("uses a thread name and deterministic preview fallback for titles", () => {
+    expect(mapThreadSummary({
+      id: "named",
+      name: "Renamed thread",
+      preview: "ignored",
+      updatedAt: 10,
+      recencyAt: null,
+      createdAt: 1,
+    } as never).title).toBe("Renamed thread");
+    expect(mapThreadSummary({
+      id: "fallback",
+      name: null,
+      preview: "  First   message that is deliberately longer than forty characters  ",
+      updatedAt: 10,
+      recencyAt: null,
+      createdAt: 1,
+    } as never).title).toBe("First message that is deliberately longe…");
+  });
+
+  it("maps turn items without duplicating agent final text", () => {
+    const history = mapThreadHistory({
+      turns: [{
+        id: "turn-1",
+        status: "completed",
+        error: null,
+        itemsView: "full",
+        startedAt: null,
+        completedAt: null,
+        durationMs: null,
+        items: [
+          {
+            type: "userMessage",
+            id: "user-1",
+            clientId: null,
+            content: [
+              { type: "text", text: "hello", text_elements: [] },
+              { type: "localImage", path: "/tmp/image.png" },
+            ],
+          },
+          { type: "reasoning", id: "reason-1", summary: ["Thought"], content: [] },
+          { type: "agentMessage", id: "agent-1", text: "final answer", phase: null, memoryCitation: null },
+          { type: "commandExecution", id: "tool-1", command: "pwd", cwd: "/tmp", processId: null, source: "agent", status: "completed", commandActions: [], aggregatedOutput: "/tmp", exitCode: 0, durationMs: 1 },
+        ],
+      }],
+    } as never);
+
+    expect(history).toHaveLength(2);
+    expect(history[0]).toMatchObject({
+      role: "user",
+      content: "hello\n[Local image: /tmp/image.png]",
+    });
+    expect(history[1]).toMatchObject({
+      role: "assistant",
+      content: "final answer",
+      thinking: "Thought",
+      toolCalls: [{ id: "tool-1", name: "command", input: { command: "pwd", cwd: "/tmp" }, result: "/tmp" }],
+    });
+    expect(history[1]?.orderedBlocks?.filter((block) => block.type === "text"))
+      .toEqual([{ type: "text", content: "final answer", turnIndex: 0, providerItemId: "agent-1" }]);
+  });
+
+  it("preserves failed and interrupted turn status as visible history markers", () => {
+    const history = mapThreadHistory({
+      turns: [
+        {
+          id: "failed-turn",
+          status: "failed",
+          error: { message: "model unavailable" },
+          itemsView: "full",
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+          items: [],
+        },
+        {
+          id: "interrupted-turn",
+          status: "interrupted",
+          error: null,
+          itemsView: "full",
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+          items: [],
+        },
+      ],
+    } as never);
+
+    expect(history).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        turnStatus: "failed",
+        error: "model unavailable",
+        content: expect.stringContaining("Turn failed: model unavailable"),
+      }),
+      expect.objectContaining({
+        role: "assistant",
+        turnStatus: "interrupted",
+        content: expect.stringContaining("Turn interrupted"),
+      }),
+    ]);
+  });
+
+  it("replays current stable and legacy collaboration items through one mapping", () => {
+    const history = mapThreadHistory({
+      turns: [{
+        id: "collab-turn", status: "completed", error: null, itemsView: "full",
+        startedAt: null, completedAt: null, durationMs: null,
+        items: [
+          {
+            type: "collabToolCall", id: "stable-spawn", tool: "spawn_agent",
+            status: "completed", senderThreadId: "parent",
+            newThreadId: "child", prompt: "Read note.md",
+            agentStatus: { status: "running", message: null },
+          },
+          {
+            type: "collabAgentToolCall", id: "legacy-close", tool: "closeAgent",
+            status: "completed", senderThreadId: "parent",
+            receiverThreadIds: ["child"], prompt: null, model: null,
+            reasoningEffort: null,
+            agentsStates: { child: { status: "shutdown", message: "closed" } },
+          },
+        ],
+      }],
+    } as never);
+
+    expect(history).toHaveLength(1);
+    expect(history[0]?.toolCalls).toEqual([
+      {
+        id: "stable-spawn", name: "spawn_agent",
+        input: {
+          prompt: "Read note.md", receiverThreadIds: ["child"],
+          newThreadIds: ["child"],
+          agents: { child: { status: "running", message: null } },
+        },
+        result: "completed",
+      },
+      {
+        id: "legacy-close", name: "close_agent",
+        input: {
+          prompt: null, receiverThreadIds: ["child"], newThreadIds: [],
+          agents: { child: { status: "shutdown", message: "closed" } },
+        },
+        result: "completed",
+      },
+    ]);
+  });
+});

@@ -448,12 +448,35 @@
   margin-bottom: 4px;
 }
 
-.hyo-permission-summary {
+.hyo-permission-summary,
+.hyo-permission-reason,
+.hyo-permission-amendment {
   font-size: 11px;
   color: var(--text-muted);
   font-family: var(--font-monospace);
   margin-bottom: 8px;
+  white-space: pre-wrap;
   word-break: break-all;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.hyo-permission-full-data {
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.hyo-permission-full-data pre {
+  margin: 6px 0 0;
+  padding: 6px;
+  font-family: var(--font-monospace);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--background-primary);
+  border-radius: var(--radius-s);
 }
 
 .hyo-permission-buttons {
@@ -2062,4 +2085,64 @@ button.hyo-ask-send:disabled {
   font-size: 12px;
   font-weight: 600;
   font-family: var(--font-monospace);
+}
+
+/* Provider identity and Codex-only status controls */
+.hyo-provider-badge {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.hyo-codex-controls,
+.hyo-codex-auth {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.hyo-codex-select,
+.hyo-codex-login {
+  min-height: 24px;
+  padding: 2px 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 11px;
+}
+
+.hyo-codex-network,
+.hyo-codex-usage,
+.hyo-codex-device-code,
+.hyo-codex-account,
+.hyo-codex-error {
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.hyo-codex-network {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.hyo-codex-error {
+  color: var(--text-error);
+}
+
+.hyo-provider-escape {
+  margin: 12px 0;
+}
+
+.hyo-provider-escape-tab {
+  margin-right: 6px;
 }

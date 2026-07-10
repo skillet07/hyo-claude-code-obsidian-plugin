@@ -1,8 +1,12 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import { useUsage } from "../hooks/useUsage";
 import { useAgents } from "../hooks/useAgents";
+import { CodexStatusControls } from "./CodexStatusControls";
+import type { ChatProvider, ProviderSessionOptions } from "../providers/types";
 
 interface HyoStatusBarProps {
+  provider: ChatProvider;
+  providerOptions: ProviderSessionOptions;
   model: string;
   permissionMode: string;
   agent: string;
@@ -15,6 +19,10 @@ interface HyoStatusBarProps {
   onAgentChange: (agent: string) => void;
   onVoiceModeToggle: () => void;
   onCompact: () => void;
+  onReasoningEffortChange: (effort?: string) => void;
+  onApprovalPolicyChange: (policy: NonNullable<ProviderSessionOptions["approvalPolicy"]>) => void;
+  onSandboxModeChange: (mode: NonNullable<ProviderSessionOptions["sandboxMode"]>) => void;
+  onNetworkAccessChange: (enabled: boolean) => void;
 }
 
 const MODEL_OPTIONS = [
@@ -78,7 +86,15 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-export function HyoStatusBar({
+export function HyoStatusBar(props: HyoStatusBarProps) {
+  return props.provider.id === "codex"
+    ? <CodexHyoStatusBar {...props} />
+    : <ClaudeHyoStatusBar {...props} />;
+}
+
+function ClaudeHyoStatusBar({
+  provider,
+  providerOptions,
   model,
   permissionMode,
   agent,
@@ -91,6 +107,10 @@ export function HyoStatusBar({
   onAgentChange,
   onVoiceModeToggle,
   onCompact,
+  onReasoningEffortChange,
+  onApprovalPolicyChange,
+  onSandboxModeChange,
+  onNetworkAccessChange,
 }: HyoStatusBarProps) {
   const agents = useAgents();
   const activeAgent = agents.find((a) => a.name === agent) || agents[0];
@@ -199,7 +219,7 @@ export function HyoStatusBar({
 
   return (
     <div className="hyo-status-bar" ref={statusBarRef}>
-      <div
+      {provider.id === "claude" && <div
         ref={usageRef}
         className={`hyo-usage-bars-group${stale ? " stale" : ""}`}
         title={stale ? "Usage data may be outdated — click to refresh" : "Usage"}
@@ -235,7 +255,7 @@ export function HyoStatusBar({
             />
           )}
         </span>
-      </div>
+      </div>}
 
       {inputTokens > 0 && (
         <ContextRing
@@ -251,6 +271,18 @@ export function HyoStatusBar({
       )}
 
       <span style={{ flex: 1 }} />
+
+      {provider.id === "codex" && (
+        <CodexStatusControls
+          provider={provider}
+          options={providerOptions}
+          onModelChange={onModelChange}
+          onReasoningEffortChange={onReasoningEffortChange}
+          onApprovalPolicyChange={onApprovalPolicyChange}
+          onSandboxModeChange={onSandboxModeChange}
+          onNetworkAccessChange={onNetworkAccessChange}
+        />
+      )}
 
       <button
         className={`hyo-voice-toggle${voiceMode ? " active" : ""}${!hasVoiceApiKey ? " disabled" : ""}`}
@@ -283,7 +315,7 @@ export function HyoStatusBar({
         <span>Voice</span>
       </button>
 
-      {agents.length > 1 && (
+      {provider.id === "claude" && agents.length > 1 && (
         <button
           ref={agentRef}
           className="hyo-agent-selector"
@@ -296,7 +328,7 @@ export function HyoStatusBar({
         </button>
       )}
 
-      <button
+      {provider.id === "claude" && <button
         ref={permRef}
         className="hyo-permission-mode-selector"
         title="Permission mode"
@@ -306,9 +338,9 @@ export function HyoStatusBar({
           <path d="M8 0L2 3v5c0 3.5 2.5 6.5 6 7 3.5-.5 6-3.5 6-7V3L8 0z" />
         </svg>
         <span className="hyo-permission-mode-name">{permName}</span>
-      </button>
+      </button>}
 
-      <button
+      {provider.id === "claude" && <button
         ref={modelRef}
         className="hyo-model-selector"
         title="Switch model"
@@ -318,7 +350,7 @@ export function HyoStatusBar({
         <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
           <path d="M4 6l4 4 4-4z" />
         </svg>
-      </button>
+      </button>}
 
       {popup === "usage" && (
         <div className="hyo-usage-popup" style={{ position: "fixed", bottom: popupBottom, left: 12 }}>
@@ -506,6 +538,121 @@ export function HyoStatusBar({
   );
 }
 
+function CodexHyoStatusBar({
+  provider,
+  providerOptions,
+  model,
+  inputTokens,
+  contextWindow,
+  voiceMode,
+  hasVoiceApiKey,
+  onModelChange,
+  onVoiceModeToggle,
+  onCompact,
+  onReasoningEffortChange,
+  onApprovalPolicyChange,
+  onSandboxModeChange,
+  onNetworkAccessChange,
+}: HyoStatusBarProps) {
+  const [contextOpen, setContextOpen] = useState(false);
+  const [popupBottom, setPopupBottom] = useState(0);
+  const [popupLeft, setPopupLeft] = useState(12);
+  const statusBarRef = useRef<HTMLDivElement>(null);
+  const contextLimit = contextWindow && contextWindow > 0
+    ? contextWindow
+    : getContextLimit(model);
+  const contextPct = inputTokens > 0
+    ? Math.min(100, (inputTokens / contextLimit) * 100)
+    : 0;
+  const contextBarClass = contextPct > 80
+    ? "danger"
+    : contextPct > 50 ? "warning" : "";
+
+  const toggleContext = () => {
+    if (contextOpen) {
+      setContextOpen(false);
+      return;
+    }
+    if (statusBarRef.current) {
+      const rect = statusBarRef.current.getBoundingClientRect();
+      setPopupBottom(globalThis.innerHeight - rect.top + 6);
+      setPopupLeft(Math.max(8, Math.min(rect.left, globalThis.innerWidth - 300 - 8)));
+    }
+    setContextOpen(true);
+  };
+
+  useEffect(() => {
+    if (!contextOpen) return;
+    const dismissOutside = (event: MouseEvent) => {
+      if (
+        statusBarRef.current &&
+        !statusBarRef.current.contains(event.target as Node)
+      ) {
+        setContextOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", dismissOutside);
+    return () => document.removeEventListener("mousedown", dismissOutside);
+  }, [contextOpen]);
+
+  return (
+    <div className="hyo-status-bar" ref={statusBarRef}>
+      {inputTokens > 0 && (
+        <ContextRing
+          pct={contextPct}
+          barClass={contextBarClass}
+          inputTokens={inputTokens}
+          contextLimit={contextLimit}
+          open={contextOpen}
+          popupBottom={popupBottom}
+          popupLeft={popupLeft}
+          onToggle={toggleContext}
+          onCompact={() => {
+            onCompact();
+            setContextOpen(false);
+          }}
+        />
+      )}
+      <span style={{ flex: 1 }} />
+      <CodexStatusControls
+        provider={provider}
+        options={providerOptions}
+        onModelChange={onModelChange}
+        onReasoningEffortChange={onReasoningEffortChange}
+        onApprovalPolicyChange={onApprovalPolicyChange}
+        onSandboxModeChange={onSandboxModeChange}
+        onNetworkAccessChange={onNetworkAccessChange}
+      />
+      <button
+        className={`hyo-voice-toggle${voiceMode ? " active" : ""}${!hasVoiceApiKey ? " disabled" : ""}`}
+        title={!hasVoiceApiKey
+          ? "Set up voice in Hyo settings"
+          : voiceMode ? "Voice mode on" : "Voice mode off"}
+        onClick={() => {
+          if (hasVoiceApiKey) onVoiceModeToggle();
+        }}
+      >
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+          <line x1="12" y1="19" x2="12" y2="23" />
+          <line x1="8" y1="23" x2="16" y2="23" />
+        </svg>
+        <span>Voice</span>
+      </button>
+    </div>
+  );
+}
+
 interface ContextRingProps {
   pct: number;
   barClass: string;
@@ -513,11 +660,12 @@ interface ContextRingProps {
   contextLimit: number;
   open: boolean;
   popupBottom: number;
+  popupLeft?: number;
   onToggle: () => void;
   onCompact: () => void;
 }
 
-function ContextRing({ pct, barClass, inputTokens, contextLimit, open, popupBottom, onToggle, onCompact }: ContextRingProps) {
+function ContextRing({ pct, barClass, inputTokens, contextLimit, open, popupBottom, popupLeft = 12, onToggle, onCompact }: ContextRingProps) {
   const r = 6;
   const circ = 2 * Math.PI * r;
   const dash = circ * (pct / 100);
@@ -545,7 +693,7 @@ function ContextRing({ pct, barClass, inputTokens, contextLimit, open, popupBott
         </svg>
       </button>
       {open && (
-        <div className="hyo-context-popup" style={{ position: "fixed", bottom: popupBottom, left: 12 }}>
+        <div className="hyo-context-popup" style={{ position: "fixed", bottom: popupBottom, left: popupLeft }}>
           <div className="hyo-usage-popup-title">CONTEXT WINDOW</div>
           <div className="hyo-usage-divider" />
           <div className="hyo-usage-row">

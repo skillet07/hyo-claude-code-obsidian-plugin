@@ -1,5 +1,5 @@
-import React, { useState, useCallback } from "react";
-import type { AskQuestionData } from "../hooks/useChatEngine";
+import React, { useState, useCallback, useEffect } from "react";
+import type { AskQuestionData } from "../chat-types";
 
 interface AskQuestionProps {
   question: AskQuestionData;
@@ -10,6 +10,11 @@ export function AskQuestion({ question, onAnswer }: AskQuestionProps) {
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [inputValue, setInputValue] = useState("");
   const questions = question.questions || [];
+
+  useEffect(() => {
+    setAnswers({});
+    setInputValue("");
+  }, [question.id]);
 
   const currentIdx = questions.findIndex((_, i) => !answers[i]);
 
@@ -23,7 +28,7 @@ export function AskQuestion({ question, onAnswer }: AskQuestionProps) {
       if (allDone) {
         const answerMap: Record<string, string> = {};
         questions.forEach((q, i) => {
-          answerMap[q.question] = newAnswers[i];
+          answerMap[questionAnswerKey(q, i, questions)] = newAnswers[i];
         });
         onAnswer(question.id, answerMap);
       }
@@ -40,7 +45,7 @@ export function AskQuestion({ question, onAnswer }: AskQuestionProps) {
 
         return (
           <div
-            key={i}
+            key={questionRenderKey(q, i, questions)}
             className={`hyo-ask-item ${isActive ? "is-active" : ""} ${isAnswered ? "is-answered" : ""} ${isPending ? "is-pending" : ""}`}
           >
             <div className="hyo-ask-item-header">
@@ -50,7 +55,7 @@ export function AskQuestion({ question, onAnswer }: AskQuestionProps) {
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                     <polyline points="20 6 9 17 4 12" />
                   </svg>
-                  {answers[i]}
+                  {q.isSecret ? "••••••" : answers[i]}
                 </span>
               )}
             </div>
@@ -82,7 +87,7 @@ export function AskQuestion({ question, onAnswer }: AskQuestionProps) {
                 )}
                 <div className="hyo-ask-input">
                   <input
-                    type="text"
+                    type={q.isSecret ? "password" : "text"}
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
                     onKeyDown={(e) => {
@@ -112,4 +117,40 @@ export function AskQuestion({ question, onAnswer }: AskQuestionProps) {
       })}
     </div>
   );
+}
+
+export function questionAnswerKey(
+  question: AskQuestionData["questions"][number],
+  index: number,
+  questions: AskQuestionData["questions"],
+): string {
+  if (question.id != null) return question.id;
+  const duplicateCount = questions.filter(
+    (candidate) => candidate.question === question.question,
+  ).length;
+  if (duplicateCount <= 1) return question.question;
+  const duplicateIndex = questions
+    .slice(0, index)
+    .filter((candidate) => candidate.question === question.question)
+    .length;
+  return duplicateIndex === 0
+    ? question.question
+    : `${question.question} (${duplicateIndex + 1})`;
+}
+
+export function questionRenderKey(
+  question: AskQuestionData["questions"][number],
+  index: number,
+  questions: AskQuestionData["questions"],
+): string {
+  const base = question.id ?? question.question;
+  const duplicateCount = questions.filter(
+    (candidate) => (candidate.id ?? candidate.question) === base,
+  ).length;
+  if (duplicateCount <= 1) return base;
+  const duplicateIndex = questions
+    .slice(0, index)
+    .filter((candidate) => (candidate.id ?? candidate.question) === base)
+    .length;
+  return duplicateIndex === 0 ? base : `${base} (${duplicateIndex + 1})`;
 }

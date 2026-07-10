@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import type { TabSession } from "../hooks/useSessionManager";
-import type { PastSession } from "../session-parser";
+import type { ProviderSessionSummary as PastSession } from "../providers/types";
 import { SessionDropdown } from "./SessionDropdown";
 
 interface ChatTabsProps {
@@ -80,6 +80,9 @@ export function ChatTabs({
             ) : (
               <>
                 {tab.generating && <span className="hyo-tab-dot" />}
+                <span className="hyo-provider-badge">
+                  {tab.providerId === "codex" ? "Codex" : "Claude"}
+                </span>
                 <span className="hyo-tab-title">{tab.title}</span>
                 <button
                   className="hyo-tab-close"

@@ -15,8 +15,10 @@ import {
   formatTokens,
   shouldInline,
   writeAttachmentToDisk,
+  writeBinaryAttachmentToDisk,
 } from "../attachments";
 import * as path from "path";
+import { clearComposerAfterAcceptedSend, prepareProviderMessage } from "./composer-send";
 
 interface AttachedFile {
   name: string;
@@ -46,11 +48,18 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
     activeTabHasSession,
     activeInputTokens,
     activeContextWindow,
+    activeProviderId,
+    activeProvider,
+    activeProviderOptions,
     newTab,
     closeTab,
     switchTab,
     renameTab,
     setTabModel,
+    setTabReasoningEffort,
+    setTabApprovalPolicy,
+    setTabSandboxMode,
+    setTabNetworkAccess,
     setTabPermissionMode,
     setTabAgent,
     toggleVoiceMode,
@@ -134,7 +143,28 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
   }, [activeTabId]);
 
   // Slash command state (checks both .claude/skills and skills/)
-  const skills = useSkills(workingDirectory);
+  const claudeSkills = useSkills(workingDirectory);
+  const [codexSkills, setCodexSkills] = useState<Skill[]>([]);
+  useEffect(() => {
+    let active = true;
+    if (activeProviderId !== "codex" || !activeProvider.listSkills) {
+      setCodexSkills([]);
+      return () => { active = false; };
+    }
+    void activeProvider.listSkills(workingDirectory).then((listed) => {
+      if (!active) return;
+      setCodexSkills(listed.filter((skill) => skill.enabled).map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+        content: "",
+        path: skill.path,
+      })));
+    }).catch(() => {
+      if (active) setCodexSkills([]);
+    });
+    return () => { active = false; };
+  }, [activeProvider, activeProviderId, workingDirectory]);
+  const skills = activeProviderId === "codex" ? codexSkills : claudeSkills;
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashFilter, setSlashFilter] = useState("");
   const [slashSelectedIdx, setSlashSelectedIdx] = useState(0);
@@ -184,16 +214,20 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
   const handleModelChange = useCallback(
     async (model: string) => {
       setTabModel(model);
-      plugin.settings.model = model;
+      if (activeProviderId === "codex") {
+        plugin.settings.providerSettings.codex.model = model;
+      } else {
+        plugin.settings.providerSettings.claude.model = model;
+      }
       await plugin.saveSettings();
     },
-    [setTabModel, plugin]
+    [activeProviderId, setTabModel, plugin]
   );
 
   const handlePermissionModeChange = useCallback(
     async (mode: string) => {
       setTabPermissionMode(mode);
-      plugin.settings.permissionMode = mode;
+      plugin.settings.providerSettings.claude.permissionMode = mode;
       await plugin.saveSettings();
     },
     [setTabPermissionMode, plugin]
@@ -346,19 +380,21 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
     (item: { name: string; builtin?: boolean }) => {
       setSlashMenuOpen(false);
       if (item.builtin && item.name === "compact") {
-        setInputValues((prev) => ({ ...prev, [activeTabId]: "" }));
-        compact();
+        clearComposerAfterAcceptedSend(compact(), () => {
+          setInputValues((prev) => ({ ...prev, [activeTabId]: "" }));
+        });
         return;
       }
       if (item.builtin && item.name === "context") {
-        setInputValues((prev) => ({ ...prev, [activeTabId]: "" }));
-        sendMessage("/context");
+        clearComposerAfterAcceptedSend(sendMessage("/context"), () => {
+          setInputValues((prev) => ({ ...prev, [activeTabId]: "" }));
+        });
         return;
       }
       setInputValues((prev) => ({ ...prev, [activeTabId]: `/${item.name} ` }));
       inputRef.current?.focus();
     },
-    [activeTabId, compact]
+    [activeTabId, compact, sendMessage]
   );
 
   const handleInput = useCallback(
@@ -384,12 +420,11 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
   const handleSend = useCallback(() => {
     const text = (inputValues[activeTabId] ?? "").trim();
     if (!text && attachedFiles.length === 0) return;
-    setInputValues((prev) => ({ ...prev, [activeTabId]: "" }));
-    if (inputRef.current) {
-      inputRef.current.style.height = "auto";
-    }
-    setSlashMenuOpen(false);
-    const meta = attachedFiles.length > 0
+    const slashName = text.match(/^\/([^\s]+)(?:\s|$)/)?.[1];
+    const isCodexSkillInvocation = activeProviderId === "codex" && !!skills.find(
+      (skill) => skill.name === slashName && skill.path,
+    );
+    const meta = attachedFiles.length > 0 || isCodexSkillInvocation
       ? { displayText: text, attachedFileNames: attachedFiles.map((f) => f.name) }
       : undefined;
 
@@ -434,22 +469,40 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
     }
     const messageText = textParts.join("\n\n");
 
-    setAttachedFilesMap((prev) => ({ ...prev, [activeTabId]: [] }));
-
-    if (imageFiles.length > 0 || pdfFiles.length > 0) {
+    let accepted: boolean;
+    if (imageFiles.length > 0 || pdfFiles.length > 0 || isCodexSkillInvocation) {
       const blocks: any[] = [];
-      if (messageText) blocks.push({ type: "text", text: messageText });
+      let prepared: string | unknown[];
+      try {
+        prepared = prepareProviderMessage({
+          providerId: activeProviderId,
+          text: messageText,
+          pdfs: pdfFiles,
+          skills,
+          writeBinary: (name, bytes) => writeBinaryAttachmentToDisk(attachmentsDir, name, bytes),
+        });
+      } catch (error) {
+        console.error("[hyo] Failed to persist PDF attachment:", error);
+        new Notice(`Could not save PDF attachment. Check write access to ${attachmentsDir} and try again.`);
+        return;
+      }
+      if (Array.isArray(prepared)) blocks.push(...prepared);
+      else if (prepared) blocks.push({ type: "text", text: prepared });
       for (const img of imageFiles) {
         blocks.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
       }
-      for (const pdf of pdfFiles) {
-        blocks.push({ type: "document", source: { type: "base64", media_type: pdf.mediaType, data: pdf.data } });
-      }
-      sendMessage(blocks as any, meta);
+      accepted = sendMessage(blocks as any, meta);
     } else {
-      sendMessage(messageText, meta);
+      accepted = sendMessage(messageText, meta);
     }
-  }, [inputValues, activeTabId, attachedFiles, sendMessage, attachmentsDir]);
+    clearComposerAfterAcceptedSend(accepted, () => {
+      setInputValues((prev) => ({ ...prev, [activeTabId]: "" }));
+      setAttachedFilesMap((prev) => ({ ...prev, [activeTabId]: [] }));
+      if (inputRef.current) inputRef.current.style.height = "auto";
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      setSlashMenuOpen(false);
+    });
+  }, [inputValues, activeTabId, attachedFiles, sendMessage, attachmentsDir, activeProviderId, skills]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -505,34 +558,43 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
 
       {activeMessages.length > 0 ? (
         <ChatMessages
+          app={app}
           messages={activeMessages}
           scrollRef={scrollRef}
           onPermissionResponse={sendPermissionResponse}
           onQuestionAnswer={sendQuestionAnswer}
           onRecover={() => {
-            const result = recoverSession(activeTabId);
-            if (result.success) {
-              if (result.capturedUserText) {
-                setInputValues((prev) => ({
-                  ...prev,
-                  [activeTabId]: result.capturedUserText!,
-                }));
-                setTimeout(() => inputRef.current?.focus(), 50);
+            void (async () => {
+              try {
+                const result = await recoverSession(activeTabId);
+                if (result.success) {
+                  if (result.capturedUserText) {
+                    setInputValues((prev) => ({
+                      ...prev,
+                      [activeTabId]: result.capturedUserText!,
+                    }));
+                    setTimeout(() => inputRef.current?.focus(), 50);
+                  }
+                  new Notice(
+                    `Session recovered (${result.linesRemoved} corrupt entries removed). Review your message and send.`
+                  );
+                } else {
+                  new Notice(
+                    `Couldn't recover session: ${result.reason || "unknown error"}`
+                  );
+                }
+              } catch (error) {
+                new Notice(
+                  `Couldn't recover session: ${error instanceof Error ? error.message : String(error)}`
+                );
               }
-              new Notice(
-                `Session recovered (${result.linesRemoved} corrupt entries removed). Review your message and send.`
-              );
-            } else {
-              new Notice(
-                `Couldn't recover session: ${result.reason || "unknown error"}`
-              );
-            }
+            })();
           }}
         />
       ) : (
         <div className="hyo-messages">
           <div className="hyo-empty-state">
-            <p>Start a conversation with Claude</p>
+            <p>Start a conversation with {activeProviderId === "codex" ? "Codex" : "Claude"}</p>
           </div>
         </div>
       )}
@@ -646,7 +708,7 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
               <textarea
                 ref={inputRef}
                 className="hyo-input"
-                placeholder="Message Claude..."
+                placeholder={`Message ${activeProviderId === "codex" ? "Codex" : "Claude"}...`}
                 rows={1}
                 value={inputValue}
                 onChange={handleInput}
@@ -686,6 +748,8 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
       </div>
 
       <HyoStatusBar
+        provider={activeProvider}
+        providerOptions={activeProviderOptions}
         model={activeModel}
         permissionMode={activePermissionMode}
         agent={activeAgent}
@@ -698,6 +762,26 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
         onAgentChange={setTabAgent}
         onVoiceModeToggle={toggleVoiceMode}
         onCompact={compact}
+        onReasoningEffortChange={(effort) => {
+          setTabReasoningEffort(effort);
+          plugin.settings.providerSettings.codex.reasoningEffort = effort ?? "";
+          void plugin.saveSettings();
+        }}
+        onApprovalPolicyChange={(policy) => {
+          setTabApprovalPolicy(policy);
+          plugin.settings.providerSettings.codex.approvalPolicy = policy;
+          void plugin.saveSettings();
+        }}
+        onSandboxModeChange={(mode) => {
+          setTabSandboxMode(mode);
+          plugin.settings.providerSettings.codex.sandboxMode = mode;
+          void plugin.saveSettings();
+        }}
+        onNetworkAccessChange={(enabled) => {
+          setTabNetworkAccess(enabled);
+          plugin.settings.providerSettings.codex.networkAccess = enabled;
+          void plugin.saveSettings();
+        }}
       />
     </div>
   );

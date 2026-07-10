@@ -7,6 +7,7 @@ export interface Skill {
   name: string;
   description: string;
   content: string;
+  path?: string;
 }
 
 function parseFrontmatter(text: string): { name: string; description: string } {

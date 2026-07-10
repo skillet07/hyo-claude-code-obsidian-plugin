@@ -3,38 +3,9 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import type HyoPlugin from "./main";
-
-export interface HyoSettings {
-  cliPath: string;
-  model: string;
-  permissionMode: string;
-  workingDirectory: string;
-  defaultAgent: string;
-  maxOutputTokens: number;
-  autoGenerateTitles: boolean;
-  // Voice
-  elevenLabsApiKey: string;
-  voiceId: string;
-  voiceName: string;
-  voicePlaybackSpeed: number;
-  voiceAutoSpeak: boolean;
-}
-
-export const DEFAULT_SETTINGS: HyoSettings = {
-  cliPath: "/usr/local/bin/claude",
-  model: "claude-sonnet-4-5-20250929",
-  permissionMode: "manual",
-  workingDirectory: "",
-  defaultAgent: "",
-  maxOutputTokens: 64000,
-  autoGenerateTitles: true,
-  // Voice
-  elevenLabsApiKey: "",
-  voiceId: "",
-  voiceName: "",
-  voicePlaybackSpeed: 1.25,
-  voiceAutoSpeak: true,
-};
+import { detectProviderCli } from "./provider-onboarding";
+import { updateCodexDefaultModel } from "./provider-settings";
+export { type HyoSettings, DEFAULT_SETTINGS } from "./provider-settings";
 
 export function dispatchSettingsChanged(): void {
   window.dispatchEvent(new CustomEvent("hyo-settings-changed"));
@@ -81,7 +52,10 @@ export class HyoSettingTab extends PluginSettingTab {
     const header = containerEl.createEl("div", {
       attr: { style: "display: flex; align-items: baseline; gap: 12px; margin-bottom: 0;" },
     });
-    header.createEl("h2", { text: "Hyo Plugin", attr: { style: "margin: 0;" } });
+    header.createEl("h2", {
+      text: "Hyo — Claude Code & Codex for Obsidian",
+      attr: { style: "margin: 0;" },
+    });
     this.savedIndicator = header.createEl("span", {
       text: "Saved",
       attr: {
@@ -96,6 +70,21 @@ export class HyoSettingTab extends PluginSettingTab {
       attr: { target: "_blank", rel: "noopener" },
     });
 
+    new Setting(containerEl)
+      .setName("Default provider")
+      .setDesc("Used for new chats only. Existing tabs keep their provider.")
+      .addDropdown((dropdown) => dropdown
+        .addOption("claude", "Claude")
+        .addOption("codex", "Codex")
+        .setValue(this.plugin.settings.defaultProvider)
+        .onChange(async (value) => {
+          this.plugin.settings.defaultProvider = value === "codex" ? "codex" : "claude";
+          await this.plugin.saveSettings();
+          this.showSaved();
+        }));
+
+    containerEl.createEl("h3", { text: "Claude defaults" });
+
     // Model
     new Setting(containerEl)
       .setName("Model")
@@ -109,9 +98,9 @@ export class HyoSettingTab extends PluginSettingTab {
           .addOption("claude-sonnet-4-6[1m]", "Sonnet 4.6 (1M)")
           .addOption("claude-sonnet-4-6", "Sonnet 4.6 (200K)")
           .addOption("claude-haiku-4-5-20251001", "Haiku 4.5 (200K)")
-          .setValue(this.plugin.settings.model)
+          .setValue(this.plugin.settings.providerSettings.claude.model)
           .onChange(async (value) => {
-            this.plugin.settings.model = value;
+            this.plugin.settings.providerSettings.claude.model = value;
             await this.plugin.saveSettings();
             this.showSaved();
           })
@@ -127,9 +116,9 @@ export class HyoSettingTab extends PluginSettingTab {
           .addOption("acceptEdits", "Accept edits")
           .addOption("bypassPermissions", "Bypass all")
           .addOption("plan", "Plan mode")
-          .setValue(this.plugin.settings.permissionMode)
+          .setValue(this.plugin.settings.providerSettings.claude.permissionMode)
           .onChange(async (value) => {
-            this.plugin.settings.permissionMode = value;
+            this.plugin.settings.providerSettings.claude.permissionMode = value;
             await this.plugin.saveSettings();
             this.showSaved();
           })
@@ -171,9 +160,9 @@ export class HyoSettingTab extends PluginSettingTab {
         .addDropdown((dropdown) => {
           dropdown.addOption("", "Default (no agent)");
           agentFiles.forEach((name) => dropdown.addOption(name, name));
-          dropdown.setValue(this.plugin.settings.defaultAgent || "");
+          dropdown.setValue(this.plugin.settings.providerSettings.claude.defaultAgent || "");
           dropdown.onChange(async (value) => {
-            this.plugin.settings.defaultAgent = value;
+            this.plugin.settings.providerSettings.claude.defaultAgent = value;
             await this.plugin.saveSettings();
             this.showSavedNear(
               agentSetting.nameEl as HTMLElement
@@ -181,6 +170,95 @@ export class HyoSettingTab extends PluginSettingTab {
           });
         });
     }
+
+    containerEl.createEl("h3", { text: "Codex defaults" });
+    new Setting(containerEl)
+      .setName("Model")
+      .setDesc("Leave blank to use the Codex server default. The active tab loads the live model catalog.")
+      .addText((text) => text
+        .setPlaceholder("Server default")
+        .setValue(this.plugin.settings.providerSettings.codex.model)
+        .onChange(async (value) => {
+          updateCodexDefaultModel(this.plugin.settings, value);
+          await this.plugin.saveSettings();
+        }));
+    new Setting(containerEl)
+      .setName("Approval policy")
+      .addDropdown((dropdown) => dropdown
+        .addOption("untrusted", "Untrusted")
+        .addOption("on-request", "On request")
+        .addOption("never", "Never ask")
+        .setValue(this.plugin.settings.providerSettings.codex.approvalPolicy)
+        .onChange(async (value) => {
+          this.plugin.settings.providerSettings.codex.approvalPolicy = value as "untrusted" | "on-request" | "never";
+          await this.plugin.saveSettings();
+        }));
+    new Setting(containerEl)
+      .setName("Sandbox mode")
+      .addDropdown((dropdown) => dropdown
+        .addOption("read-only", "Read only")
+        .addOption("workspace-write", "Workspace write")
+        .addOption("danger-full-access", "Danger: full access")
+        .setValue(this.plugin.settings.providerSettings.codex.sandboxMode)
+        .onChange(async (value) => {
+          if (value === "danger-full-access" && !window.confirm(
+            "Danger: full access removes Codex sandbox protection. Enable it?",
+          )) {
+            this.display();
+            return;
+          }
+          this.plugin.settings.providerSettings.codex.sandboxMode = value as "read-only" | "workspace-write" | "danger-full-access";
+          await this.plugin.saveSettings();
+        }));
+    new Setting(containerEl)
+      .setName("Network access")
+      .setDesc("Allow Codex commands in the sandbox to access the network.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.providerSettings.codex.networkAccess)
+        .onChange(async (value) => {
+          this.plugin.settings.providerSettings.codex.networkAccess = value;
+          await this.plugin.saveSettings();
+        }));
+
+    const codexCliSetting = new Setting(containerEl)
+      .setName("Codex CLI path")
+      .setDesc("Custom path or command for Codex CLI.")
+      .addText((text) => text
+        .setPlaceholder("codex")
+        .setValue(this.plugin.settings.providerSettings.codex.cliPath)
+        .onChange(async (value) => {
+          this.plugin.settings.providerSettings.codex.cliPath = value.trim() || "codex";
+          await this.plugin.saveSettings();
+        }));
+    codexCliSetting.addButton((button) => button
+      .setButtonText("Auto-detect")
+      .onClick(async () => {
+        const { execFileSync } = require("child_process");
+        const detected = detectProviderCli({
+          providerId: "codex",
+          configuredPath: this.plugin.settings.providerSettings.codex.cliPath,
+          platform: process.platform,
+          home: os.homedir(),
+          appData: process.env.APPDATA || "",
+          localAppData: process.env.LOCALAPPDATA || "",
+          exists: fs.existsSync,
+          findOnPath: (binary) => {
+            try {
+              return execFileSync(process.platform === "win32" ? "where" : "which", [binary], {
+                encoding: "utf8", timeout: 5000,
+              }).trim().split(/\r?\n/)[0] || "";
+            } catch { return ""; }
+          },
+        });
+        if (!detected) {
+          new Notice("Could not find Codex CLI. Install it or set the path manually.");
+          return;
+        }
+        this.plugin.settings.providerSettings.codex.cliPath = detected;
+        await this.plugin.saveSettings();
+        this.display();
+        new Notice(`✓ Found Codex at ${detected}`);
+      }));
 
     // Voice Settings
     containerEl.createEl("h3", {
@@ -306,7 +384,7 @@ export class HyoSettingTab extends PluginSettingTab {
     const workingDirSetting = new Setting(containerEl)
       .setName("Working directory")
       .setDesc(
-        "Claude's home folder — where it looks for your CLAUDE.md and starts working from. Defaults to your current Obsidian vault. Set this to a different folder if your Claude project lives outside your vault."
+        "Shared project folder where Claude Code and Codex start and load their provider-specific instructions (for example, CLAUDE.md or AGENTS.md). Defaults to your current Obsidian vault. Set this when either provider's project lives outside the vault."
       )
       .addText((text) =>
         text
@@ -345,11 +423,11 @@ export class HyoSettingTab extends PluginSettingTab {
       .addText((text) =>
         text
           .setPlaceholder("64000")
-          .setValue(String(this.plugin.settings.maxOutputTokens))
+          .setValue(String(this.plugin.settings.providerSettings.claude.maxOutputTokens))
           .onChange(async (value) => {
             const n = parseInt(value, 10);
             if (!isNaN(n) && n >= 1024) {
-              this.plugin.settings.maxOutputTokens = n;
+              this.plugin.settings.providerSettings.claude.maxOutputTokens = n;
               await this.plugin.saveSettings();
               this.showSavedNear(maxTokensSetting.nameEl as HTMLElement);
             }
@@ -365,9 +443,9 @@ export class HyoSettingTab extends PluginSettingTab {
       .addText((text) =>
         text
           .setPlaceholder("/usr/local/bin/claude")
-          .setValue(this.plugin.settings.cliPath)
+          .setValue(this.plugin.settings.providerSettings.claude.cliPath)
           .onChange(async (value) => {
-            this.plugin.settings.cliPath = value;
+            this.plugin.settings.providerSettings.claude.cliPath = value;
             await this.plugin.saveSettings();
             this.showSavedNear(cliPathSetting.nameEl as HTMLElement);
           })
@@ -415,7 +493,7 @@ export class HyoSettingTab extends PluginSettingTab {
         }
 
         if (detected) {
-          this.plugin.settings.cliPath = detected;
+          this.plugin.settings.providerSettings.claude.cliPath = detected;
           await this.plugin.saveSettings();
           this.display();
           new Notice(`✓ Found Claude at ${detected}`);
@@ -432,10 +510,10 @@ export class HyoSettingTab extends PluginSettingTab {
         const { dialog } = require("electron").remote;
         const result = await dialog.showOpenDialog({
           properties: ["openFile"],
-          defaultPath: path.dirname(this.plugin.settings.cliPath || "/usr/local/bin"),
+          defaultPath: path.dirname(this.plugin.settings.providerSettings.claude.cliPath || "/usr/local/bin"),
         });
         if (!result.canceled && result.filePaths.length > 0) {
-          this.plugin.settings.cliPath = result.filePaths[0];
+          this.plugin.settings.providerSettings.claude.cliPath = result.filePaths[0];
           await this.plugin.saveSettings();
           this.display();
         }
