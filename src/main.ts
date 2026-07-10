@@ -3,7 +3,13 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { HyoView, VIEW_TYPE_HYO } from "./HyoView";
-import { HyoSettingTab, HyoSettings, DEFAULT_SETTINGS, dispatchSettingsChanged } from "./settings";
+import { HyoSettingTab, dispatchSettingsChanged } from "./settings";
+import {
+  type HyoSettings,
+  DEFAULT_SETTINGS,
+  migrateSettings,
+  sanitizeSettingsForPersistence,
+} from "./provider-settings";
 import { cleanupOldAttachments } from "./attachments";
 
 export default class HyoPlugin extends Plugin {
@@ -46,55 +52,34 @@ export default class HyoPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign(
-      {},
-      DEFAULT_SETTINGS,
-      await this.loadData()
-    );
-    // Reset stale shorthand model IDs to the default (Sonnet)
-    const staleShorthands = ["opus", "sonnet", "haiku"];
-    if (staleShorthands.includes(this.settings.model)) {
-      this.settings.model = DEFAULT_SETTINGS.model;
-      await this.saveData(this.settings);
-    }
-    // Sonnet 5 shipped in 0.3.5 with a "[1m]" suffix in its model ID. 0.3.6
-    // dropped the suffix (Sonnet 5 runs 1M natively and doesn't accept it —
-    // the API silently drops to 200K context if you pass it), but settings
-    // saved under 0.3.5 still have the old string. Migrate it forward.
-    if (this.settings.model === "claude-sonnet-5[1m]") {
-      this.settings.model = "claude-sonnet-5";
-      await this.saveData(this.settings);
-    }
-    // The CLI renamed the "default" permission mode to "manual" at some
-    // point after 2.1.32. Settings saved under the old CLI still have the
-    // old string, which the new CLI rejects as an invalid --permission-mode
-    // value. Migrate it forward.
-    if (this.settings.permissionMode === "default") {
-      this.settings.permissionMode = "manual";
+    const stored = await this.loadData();
+    this.settings = migrateSettings(stored);
+    if (JSON.stringify(stored ?? {}) !== JSON.stringify(this.settings)) {
       await this.saveData(this.settings);
     }
     // Clear defaultAgent if no matching file exists in ~/.claude/agents/.
     // Fixes stale state from older plugin versions that hardcoded an agent name.
-    if (this.settings.defaultAgent) {
+    if (this.settings.providerSettings.claude.defaultAgent) {
       try {
         const agentFile = path.join(
           os.homedir(),
           ".claude",
           "agents",
-          `${this.settings.defaultAgent}.md`
+          `${this.settings.providerSettings.claude.defaultAgent}.md`
         );
         if (!fs.existsSync(agentFile)) {
-          this.settings.defaultAgent = "";
+          this.settings.providerSettings.claude.defaultAgent = "";
           await this.saveData(this.settings);
         }
       } catch {
-        this.settings.defaultAgent = "";
+        this.settings.providerSettings.claude.defaultAgent = "";
         await this.saveData(this.settings);
       }
     }
   }
 
   async saveSettings() {
+    this.settings = sanitizeSettingsForPersistence(this.settings);
     await this.saveData(this.settings);
     dispatchSettingsChanged();
   }

@@ -1,8 +1,12 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import { useUsage } from "../hooks/useUsage";
 import { useAgents } from "../hooks/useAgents";
+import { CodexStatusControls } from "./CodexStatusControls";
+import type { ChatProvider, ProviderSessionOptions } from "../providers/types";
 
 interface HyoStatusBarProps {
+  provider: ChatProvider;
+  providerOptions: ProviderSessionOptions;
   model: string;
   permissionMode: string;
   agent: string;
@@ -15,6 +19,10 @@ interface HyoStatusBarProps {
   onAgentChange: (agent: string) => void;
   onVoiceModeToggle: () => void;
   onCompact: () => void;
+  onReasoningEffortChange: (effort?: string) => void;
+  onApprovalPolicyChange: (policy: NonNullable<ProviderSessionOptions["approvalPolicy"]>) => void;
+  onSandboxModeChange: (mode: NonNullable<ProviderSessionOptions["sandboxMode"]>) => void;
+  onNetworkAccessChange: (enabled: boolean) => void;
 }
 
 const MODEL_OPTIONS = [
@@ -79,6 +87,8 @@ function formatTokens(n: number): string {
 }
 
 export function HyoStatusBar({
+  provider,
+  providerOptions,
   model,
   permissionMode,
   agent,
@@ -91,6 +101,10 @@ export function HyoStatusBar({
   onAgentChange,
   onVoiceModeToggle,
   onCompact,
+  onReasoningEffortChange,
+  onApprovalPolicyChange,
+  onSandboxModeChange,
+  onNetworkAccessChange,
 }: HyoStatusBarProps) {
   const agents = useAgents();
   const activeAgent = agents.find((a) => a.name === agent) || agents[0];
@@ -199,7 +213,7 @@ export function HyoStatusBar({
 
   return (
     <div className="hyo-status-bar" ref={statusBarRef}>
-      <div
+      {provider.id === "claude" && <div
         ref={usageRef}
         className={`hyo-usage-bars-group${stale ? " stale" : ""}`}
         title={stale ? "Usage data may be outdated — click to refresh" : "Usage"}
@@ -235,7 +249,7 @@ export function HyoStatusBar({
             />
           )}
         </span>
-      </div>
+      </div>}
 
       {inputTokens > 0 && (
         <ContextRing
@@ -251,6 +265,18 @@ export function HyoStatusBar({
       )}
 
       <span style={{ flex: 1 }} />
+
+      {provider.id === "codex" && (
+        <CodexStatusControls
+          provider={provider}
+          options={providerOptions}
+          onModelChange={onModelChange}
+          onReasoningEffortChange={onReasoningEffortChange}
+          onApprovalPolicyChange={onApprovalPolicyChange}
+          onSandboxModeChange={onSandboxModeChange}
+          onNetworkAccessChange={onNetworkAccessChange}
+        />
+      )}
 
       <button
         className={`hyo-voice-toggle${voiceMode ? " active" : ""}${!hasVoiceApiKey ? " disabled" : ""}`}
@@ -283,7 +309,7 @@ export function HyoStatusBar({
         <span>Voice</span>
       </button>
 
-      {agents.length > 1 && (
+      {provider.id === "claude" && agents.length > 1 && (
         <button
           ref={agentRef}
           className="hyo-agent-selector"
@@ -296,7 +322,7 @@ export function HyoStatusBar({
         </button>
       )}
 
-      <button
+      {provider.id === "claude" && <button
         ref={permRef}
         className="hyo-permission-mode-selector"
         title="Permission mode"
@@ -306,9 +332,9 @@ export function HyoStatusBar({
           <path d="M8 0L2 3v5c0 3.5 2.5 6.5 6 7 3.5-.5 6-3.5 6-7V3L8 0z" />
         </svg>
         <span className="hyo-permission-mode-name">{permName}</span>
-      </button>
+      </button>}
 
-      <button
+      {provider.id === "claude" && <button
         ref={modelRef}
         className="hyo-model-selector"
         title="Switch model"
@@ -318,7 +344,7 @@ export function HyoStatusBar({
         <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
           <path d="M4 6l4 4 4-4z" />
         </svg>
-      </button>
+      </button>}
 
       {popup === "usage" && (
         <div className="hyo-usage-popup" style={{ position: "fixed", bottom: popupBottom, left: 12 }}>

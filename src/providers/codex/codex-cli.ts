@@ -253,7 +253,7 @@ export async function assertCodexCliVersion(
   const minimum = parseCodexVersion(MINIMUM_CODEX_CLI_VERSION);
   if (compareVersions(version, minimum) < 0) {
     throw new CodexCliUnavailableError(
-      `Found ${version.raw}, but Hyo requires ${MINIMUM_CODEX_CLI_VERSION} or newer. Please update Codex CLI and restart Obsidian.`,
+      `Found ${version.raw}, but Hyo requires ${MINIMUM_CODEX_CLI_VERSION} or newer. Update with: curl -fsSL https://chatgpt.com/codex/install.sh | sh — then restart Obsidian.`,
     );
   }
   return version;

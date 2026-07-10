@@ -55,6 +55,14 @@ describe("Codex CLI version checks", () => {
     ).resolves.toMatchObject({ raw: MINIMUM_CODEX_CLI_VERSION });
   });
 
+  it("gives an actionable official update command for an old CLI", async () => {
+    await expect(assertCodexCliVersion({
+      runVersion: () => "codex-cli 0.144.0",
+    })).rejects.toThrow(
+      "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+    );
+  });
+
   it("does not treat a prerelease as satisfying the stable minimum", async () => {
     await expect(
       assertCodexCliVersion({ runVersion: () => "codex-cli 0.144.1-beta.1" }),

@@ -80,6 +80,9 @@ export function ChatTabs({
             ) : (
               <>
                 {tab.generating && <span className="hyo-tab-dot" />}
+                <span className="hyo-provider-badge">
+                  {tab.providerId === "codex" ? "Codex" : "Claude"}
+                </span>
                 <span className="hyo-tab-title">{tab.title}</span>
                 <button
                   className="hyo-tab-close"

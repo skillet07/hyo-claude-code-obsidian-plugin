@@ -47,11 +47,18 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
     activeTabHasSession,
     activeInputTokens,
     activeContextWindow,
+    activeProviderId,
+    activeProvider,
+    activeProviderOptions,
     newTab,
     closeTab,
     switchTab,
     renameTab,
     setTabModel,
+    setTabReasoningEffort,
+    setTabApprovalPolicy,
+    setTabSandboxMode,
+    setTabNetworkAccess,
     setTabPermissionMode,
     setTabAgent,
     toggleVoiceMode,
@@ -135,7 +142,27 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
   }, [activeTabId]);
 
   // Slash command state (checks both .claude/skills and skills/)
-  const skills = useSkills(workingDirectory);
+  const claudeSkills = useSkills(workingDirectory);
+  const [codexSkills, setCodexSkills] = useState<Skill[]>([]);
+  useEffect(() => {
+    let active = true;
+    if (activeProviderId !== "codex" || !activeProvider.listSkills) {
+      setCodexSkills([]);
+      return () => { active = false; };
+    }
+    void activeProvider.listSkills(workingDirectory).then((listed) => {
+      if (!active) return;
+      setCodexSkills(listed.filter((skill) => skill.enabled).map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+        content: "",
+      })));
+    }).catch(() => {
+      if (active) setCodexSkills([]);
+    });
+    return () => { active = false; };
+  }, [activeProvider, activeProviderId, workingDirectory]);
+  const skills = activeProviderId === "codex" ? codexSkills : claudeSkills;
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashFilter, setSlashFilter] = useState("");
   const [slashSelectedIdx, setSlashSelectedIdx] = useState(0);
@@ -185,16 +212,20 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
   const handleModelChange = useCallback(
     async (model: string) => {
       setTabModel(model);
-      plugin.settings.model = model;
+      if (activeProviderId === "codex") {
+        plugin.settings.providerSettings.codex.model = model;
+      } else {
+        plugin.settings.providerSettings.claude.model = model;
+      }
       await plugin.saveSettings();
     },
-    [setTabModel, plugin]
+    [activeProviderId, setTabModel, plugin]
   );
 
   const handlePermissionModeChange = useCallback(
     async (mode: string) => {
       setTabPermissionMode(mode);
-      plugin.settings.permissionMode = mode;
+      plugin.settings.providerSettings.claude.permissionMode = mode;
       await plugin.saveSettings();
     },
     [setTabPermissionMode, plugin]
@@ -545,7 +576,7 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
       ) : (
         <div className="hyo-messages">
           <div className="hyo-empty-state">
-            <p>Start a conversation with Claude</p>
+            <p>Start a conversation with {activeProviderId === "codex" ? "Codex" : "Claude"}</p>
           </div>
         </div>
       )}
@@ -659,7 +690,7 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
               <textarea
                 ref={inputRef}
                 className="hyo-input"
-                placeholder="Message Claude..."
+                placeholder={`Message ${activeProviderId === "codex" ? "Codex" : "Claude"}...`}
                 rows={1}
                 value={inputValue}
                 onChange={handleInput}
@@ -699,6 +730,8 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
       </div>
 
       <HyoStatusBar
+        provider={activeProvider}
+        providerOptions={activeProviderOptions}
         model={activeModel}
         permissionMode={activePermissionMode}
         agent={activeAgent}
@@ -711,6 +744,26 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
         onAgentChange={setTabAgent}
         onVoiceModeToggle={toggleVoiceMode}
         onCompact={compact}
+        onReasoningEffortChange={(effort) => {
+          setTabReasoningEffort(effort);
+          plugin.settings.providerSettings.codex.reasoningEffort = effort ?? "";
+          void plugin.saveSettings();
+        }}
+        onApprovalPolicyChange={(policy) => {
+          setTabApprovalPolicy(policy);
+          plugin.settings.providerSettings.codex.approvalPolicy = policy;
+          void plugin.saveSettings();
+        }}
+        onSandboxModeChange={(mode) => {
+          setTabSandboxMode(mode);
+          plugin.settings.providerSettings.codex.sandboxMode = mode;
+          void plugin.saveSettings();
+        }}
+        onNetworkAccessChange={(enabled) => {
+          setTabNetworkAccess(enabled);
+          plugin.settings.providerSettings.codex.networkAccess = enabled;
+          void plugin.saveSettings();
+        }}
       />
     </div>
   );
