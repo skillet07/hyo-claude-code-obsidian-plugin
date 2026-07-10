@@ -213,19 +213,48 @@ export function useSessionManager(options: SessionManagerOptions) {
   const [pastSessions, setPastSessions] = useState<ProviderSessionSummary[]>([]);
 
   const lifecycleRef = useRef(new SessionLifecycle<ProviderRuntime>());
+  const activeProviderRef = useRef(provider);
   const streamStatesRef = useRef<Record<string, StreamState>>({});
   const scrollRef = useRef({ nearBottom: true });
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  // Detach leases before provider teardown so close callbacks cannot mutate a
-  // successor. The provider is the sole teardown owner for this cleanup path.
+  // Provider replacement happens while mounted, so finalize only tabs owned
+  // by the retired provider. Detach leases first so teardown callbacks cannot
+  // mutate those tabs or a successor runtime.
+  useEffect(() => {
+    const previousProvider = activeProviderRef.current;
+    if (previousProvider === provider) return;
+
+    activeProviderRef.current = provider;
+    const retiredTabIds = new Set(lifecycleRef.current.detachAll());
+    for (const tabId of retiredTabIds) delete streamStatesRef.current[tabId];
+    setState((prev) => ({
+      ...prev,
+      tabs: prev.tabs.map((tab) =>
+        retiredTabIds.has(tab.id)
+          ? {
+              ...tab,
+              generating: false,
+              messages: tab.messages.map((message) =>
+                message.role === "assistant" && message.streaming
+                  ? { ...message, streaming: false }
+                  : message,
+              ),
+            }
+          : tab,
+      ),
+    }));
+    previousProvider.cleanup();
+  }, [provider]);
+
+  // Unmount teardown must not enqueue React state updates.
   useEffect(() => {
     return () => {
       lifecycleRef.current.detachAll();
-      provider.cleanup();
+      activeProviderRef.current.cleanup();
     };
-  }, [provider]);
+  }, []);
 
   // ------- internal helpers -------
 

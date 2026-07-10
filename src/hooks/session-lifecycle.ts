@@ -48,9 +48,11 @@ export class SessionLifecycle<Runtime extends SessionRuntime> {
     entry?.runtime.cleanup();
   }
 
-  detachAll(): void {
+  detachAll(): string[] {
+    const tabIds = [...this.runtimes.keys()];
     this.runtimes.clear();
     this.busyTabs.clear();
+    return tabIds;
   }
 
   beginTurn(tabId: string): boolean {

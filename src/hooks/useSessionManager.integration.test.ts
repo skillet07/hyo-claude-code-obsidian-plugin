@@ -215,6 +215,8 @@ describe("useSessionManager lifecycle integration", () => {
 
     expect(providerA.cleanupCalls).toBe(1);
     expect(oldRuntime.cleanupCalls).toBe(1);
+    expect(manager.activeGenerating).toBe(false);
+    expect(manager.activeMessages.at(-1)?.streaming).toBe(false);
 
     let accepted: boolean | undefined;
     act(() => {
