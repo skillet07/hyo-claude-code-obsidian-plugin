@@ -132,14 +132,22 @@ describe("spawnCodexAppServer", () => {
   });
 
   it("reports process errors once even if close follows", async () => {
-    const child = new FakeProcess();
+    const child = new FakeProcess(false);
     const server = await spawnCodexAppServer({
       spawn: () => child,
       versionCheck: () => undefined,
     });
     const error = new Error("spawn failed");
+    let exited = false;
+    void server.exit.then(() => {
+      exited = true;
+    });
 
     child.emit("error", error);
+
+    await expect(server.failure).resolves.toMatchObject({ error });
+    await Promise.resolve();
+    expect(exited).toBe(false);
     child.emit("close", null, null);
 
     await expect(server.exit).resolves.toMatchObject({
@@ -150,7 +158,7 @@ describe("spawnCodexAppServer", () => {
   });
 
   it("captures stdin EPIPE during a write-close race", async () => {
-    const child = new FakeProcess();
+    const child = new FakeProcess(false);
     const server = await spawnCodexAppServer({
       spawn: () => child,
       versionCheck: () => undefined,
@@ -158,18 +166,24 @@ describe("spawnCodexAppServer", () => {
     const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
     const transport = createProcessTransport(server);
     const pending = transport.request("thread/list", {}).catch((reason) => reason);
+    let exited = false;
+    void server.exit.then(() => {
+      exited = true;
+    });
 
     child.stdin.emit("error", error);
-    child.emit("close", 0, null);
 
-    await expect(server.exit).resolves.toMatchObject({
+    await expect(server.failure).resolves.toMatchObject({
       code: null,
       signal: null,
       error,
     });
+    expect(exited).toBe(false);
     const rejection = await pending;
     expect(rejection).toBeInstanceOf(CodexAppServerExitedError);
     expect(rejection).toMatchObject({ exit: { error } });
+    child.emit("close", 0, null);
+    await expect(server.exit).resolves.toMatchObject({ code: 0, error });
     expect(child.killCalls).toEqual(["SIGTERM"]);
   });
 
@@ -185,6 +199,10 @@ describe("spawnCodexAppServer", () => {
     const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
 
     child.stdin.emit("error", error);
+    const exited = server.exit.then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
     const stopped = server.stop().then(
       () => undefined,
       (reason: unknown) => reason,
@@ -193,6 +211,10 @@ describe("spawnCodexAppServer", () => {
 
     expect(child.killCalls).toEqual(["SIGTERM", "SIGKILL"]);
     expect(await stopped).toMatchObject({
+      name: "AppServerLifecycleError",
+      cause: error,
+    });
+    expect(await exited).toMatchObject({
       name: "AppServerLifecycleError",
       cause: error,
     });
@@ -251,11 +273,16 @@ describe("spawnCodexAppServer", () => {
       () => undefined,
       (reason: unknown) => reason,
     );
+    const exited = server.exit.then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
 
     await vi.advanceTimersByTimeAsync(10);
 
     expect(await stopped).toMatchObject({ name: "AppServerLifecycleError" });
-    expect((await stopped as Error).message).toMatch(/Windows.*PID.*taskkill/i);
+    expect(await exited).toMatchObject({ name: "AppServerLifecycleError" });
+    expect(((await stopped) as Error).message).toMatch(/Windows.*PID.*taskkill/i);
     vi.useRealTimers();
   });
 
@@ -280,6 +307,10 @@ describe("spawnCodexAppServer", () => {
       () => undefined,
       (reason: unknown) => reason,
     );
+    const exited = server.exit.then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
 
     await vi.advanceTimersByTimeAsync(20);
 
@@ -288,6 +319,55 @@ describe("spawnCodexAppServer", () => {
       name: "AppServerLifecycleError",
       message: expect.stringMatching(/taskkill.*did not finish/i),
     });
+    expect(await exited).toMatchObject({ name: "AppServerLifecycleError" });
+    vi.useRealTimers();
+  });
+
+  it("accepts natural close racing a failed taskkill command", async () => {
+    vi.useFakeTimers();
+    const child = new FakeProcess(false, 4321);
+    const shim = win32.join("C:\\npm", "codex.CMD");
+    const server = await spawnCodexAppServer({
+      env: { PATH: "C:\\npm", PATHEXT: ".EXE;.CMD" },
+      platform: "win32",
+      fileExists: (path) => path === shim,
+      spawn: () => child,
+      versionCheck: () => undefined,
+      shutdownTimeoutMs: 10,
+      forceKillGraceMs: 10,
+      runTerminationCommand: async () => {
+        child.emit("close", 0, null);
+        throw new Error("taskkill raced with natural close");
+      },
+    });
+
+    const stopped = server.stop();
+    await vi.advanceTimersByTimeAsync(10);
+
+    await expect(stopped).resolves.toMatchObject({ code: 0 });
+    vi.useRealTimers();
+  });
+
+  it("accepts natural close racing a taskkill timeout", async () => {
+    vi.useFakeTimers();
+    const child = new FakeProcess(false, 4321);
+    const shim = win32.join("C:\\npm", "codex.CMD");
+    const server = await spawnCodexAppServer({
+      env: { PATH: "C:\\npm", PATHEXT: ".EXE;.CMD" },
+      platform: "win32",
+      fileExists: (path) => path === shim,
+      spawn: () => child,
+      versionCheck: () => undefined,
+      shutdownTimeoutMs: 10,
+      forceKillGraceMs: 10,
+      runTerminationCommand: () => new Promise<void>(() => undefined),
+    });
+    setTimeout(() => child.emit("close", 0, null), 20);
+
+    const stopped = server.stop();
+    await vi.advanceTimersByTimeAsync(20);
+
+    await expect(stopped).resolves.toMatchObject({ code: 0 });
     vi.useRealTimers();
   });
 

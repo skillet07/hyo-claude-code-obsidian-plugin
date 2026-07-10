@@ -133,10 +133,13 @@ describe("CodexAppServerClient", () => {
     ]);
   });
 
-  it("rejects pending transport work when the process exits", async () => {
+  it("rejects pending work on failure without treating the process as closed", async () => {
     const stdout = new PassThrough();
     const writes: string[] = [];
     let resolveExit!: (value: Awaited<CodexAppServerProcess["exit"]>) => void;
+    let resolveFailure!: (
+      value: Awaited<CodexAppServerProcess["failure"]>,
+    ) => void;
     const process: CodexAppServerProcess = {
       stdin: {
         write: (value) => {
@@ -149,6 +152,9 @@ describe("CodexAppServerClient", () => {
         },
       },
       stdout,
+      failure: new Promise((resolve) => {
+        resolveFailure = resolve;
+      }),
       exit: new Promise((resolve) => {
         resolveExit = resolve;
       }),
@@ -156,14 +162,30 @@ describe("CodexAppServerClient", () => {
     };
     const transport = createProcessTransport(process);
     const pending = transport.request("thread/list", {});
-    const rejection = pending.catch((error: unknown) => error);
-    const exit = { code: 9, signal: null, stderr: "fatal stderr" } as const;
+    let rejected = false;
+    const rejection = pending.catch((error: unknown) => {
+      rejected = true;
+      return error;
+    });
+    const failure = {
+      code: null,
+      signal: null,
+      stderr: "fatal stderr",
+      error: new Error("write EPIPE"),
+    } as const;
+    const exit = { code: 0, signal: null, stderr: "fatal stderr" } as const;
 
+    resolveFailure(failure);
+    await vi.waitFor(() => expect(rejected).toBe(true));
+    const rejectedBeforeClose = rejected;
     resolveExit(exit);
 
     const error = await rejection;
+    expect(rejectedBeforeClose).toBe(true);
     expect(error).toBeInstanceOf(CodexAppServerExitedError);
-    expect(error).toMatchObject({ exit });
+    expect(error).toMatchObject({ exit: failure });
+    const laterError = await transport.request("later", {}).catch((reason) => reason);
+    expect(laterError).toBe(error);
     expect(writes).toHaveLength(1);
   });
 });

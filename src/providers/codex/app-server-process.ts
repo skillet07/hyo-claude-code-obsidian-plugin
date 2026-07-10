@@ -62,6 +62,7 @@ export interface SpawnCodexAppServerOptions {
 export interface CodexAppServerProcess {
   stdin: AppServerWritable;
   stdout: AppServerReadable;
+  failure: Promise<AppServerExit>;
   exit: Promise<AppServerExit>;
   stop(): Promise<AppServerExit>;
 }
@@ -133,11 +134,18 @@ export async function spawnCodexAppServer(
   const maxStderrBytes = options.maxStderrBytes ?? DEFAULT_MAX_STDERR_BYTES;
   let stderr = Buffer.alloc(0);
   let closed = false;
-  let reported = false;
+  let failureReported = false;
+  let exitSettled = false;
   let failure: Error | undefined;
+  let resolveFailure!: (failure: AppServerExit) => void;
+  const failurePromise = new Promise<AppServerExit>((resolve) => {
+    resolveFailure = resolve;
+  });
   let resolveExit!: (exit: AppServerExit) => void;
-  const exit = new Promise<AppServerExit>((resolve) => {
+  let rejectExit!: (error: Error) => void;
+  const exit = new Promise<AppServerExit>((resolve, reject) => {
     resolveExit = resolve;
+    rejectExit = reject;
   });
   let resolveClosed!: (exit: AppServerExit) => void;
   const closedPromise = new Promise<AppServerExit>((resolve) => {
@@ -156,10 +164,10 @@ export async function spawnCodexAppServer(
   });
 
   const reportFailure = (error: Error) => {
-    if (reported) return;
+    if (failureReported) return;
     failure = error;
-    reported = true;
-    resolveExit(makeReport(null, null, error));
+    failureReported = true;
+    resolveFailure(makeReport(null, null, error));
   };
 
   const reportClose = (
@@ -170,8 +178,8 @@ export async function spawnCodexAppServer(
     closed = true;
     const report = makeReport(code, signal);
     resolveClosed(report);
-    if (!reported) {
-      reported = true;
+    if (!exitSettled) {
+      exitSettled = true;
       resolveExit(report);
     }
   };
@@ -202,7 +210,15 @@ export async function spawnCodexAppServer(
         error instanceof Error
           ? error
           : new AppServerLifecycleError(String(error), failure);
+      if (closed) {
+        void closedPromise.then(resolveStop);
+        return;
+      }
       reportFailure(lifecycleError);
+      if (!exitSettled) {
+        exitSettled = true;
+        rejectExit(lifecycleError);
+      }
       rejectStop(lifecycleError);
     });
     return stopPromise;
@@ -227,7 +243,13 @@ export async function spawnCodexAppServer(
   });
   child.on("close", reportClose);
 
-  return { stdin: child.stdin, stdout: child.stdout, exit, stop };
+  return {
+    stdin: child.stdin,
+    stdout: child.stdout,
+    failure: failurePromise,
+    exit,
+    stop,
+  };
 }
 
 interface StopChildOptions {
@@ -249,6 +271,7 @@ async function stopChild(options: StopChildOptions): Promise<AppServerExit> {
     if (await resolvesBefore(options.closed, options.shutdownTimeoutMs)) {
       return options.closed;
     }
+    if (options.isClosed()) return options.closed;
     const pid = options.child.pid;
     if (pid === undefined) {
       throw new AppServerLifecycleError(
@@ -265,6 +288,7 @@ async function stopChild(options: StopChildOptions): Promise<AppServerExit> {
       ]),
       options.forceKillGraceMs,
     );
+    if (options.isClosed()) return options.closed;
     if (!termination) {
       throw new AppServerLifecycleError(
         `taskkill.exe did not finish while terminating Windows Codex process tree for PID ${pid}.`,
@@ -280,6 +304,7 @@ async function stopChild(options: StopChildOptions): Promise<AppServerExit> {
     if (await resolvesBefore(options.closed, options.forceKillGraceMs)) {
       return options.closed;
     }
+    if (options.isClosed()) return options.closed;
     throw new AppServerLifecycleError(
       `Windows Codex process tree for PID ${pid} did not close after taskkill.exe.`,
       options.failure(),
@@ -290,10 +315,12 @@ async function stopChild(options: StopChildOptions): Promise<AppServerExit> {
   if (await resolvesBefore(options.closed, options.shutdownTimeoutMs)) {
     return options.closed;
   }
+  if (options.isClosed()) return options.closed;
   options.child.kill("SIGKILL");
   if (await resolvesBefore(options.closed, options.forceKillGraceMs)) {
     return options.closed;
   }
+  if (options.isClosed()) return options.closed;
   throw new AppServerLifecycleError(
     "Codex app-server did not close after SIGTERM and SIGKILL.",
     options.failure(),

@@ -153,8 +153,19 @@ export function createProcessTransport(
     },
   });
   process.stdout.on("data", (chunk) => transport.push(chunk));
-  void process.exit.then((exit) => {
-    transport.dispose(new CodexAppServerExitedError(exit));
+  let disposed = false;
+  const disposeOnce = (error: Error) => {
+    if (disposed) return;
+    disposed = true;
+    transport.dispose(error);
+  };
+  void process.failure.then((failure) => {
+    disposeOnce(new CodexAppServerExitedError(failure));
   });
+  void process.exit.then(
+    (exit) => disposeOnce(new CodexAppServerExitedError(exit)),
+    (error: unknown) =>
+      disposeOnce(error instanceof Error ? error : new Error(String(error))),
+  );
   return transport;
 }
