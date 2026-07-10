@@ -3,6 +3,7 @@ import {
   DEFAULT_SETTINGS,
   migrateSettings,
   sanitizeSettingsForPersistence,
+  updateCodexDefaultModel,
 } from "./provider-settings";
 
 describe("provider settings", () => {
@@ -102,5 +103,18 @@ describe("provider settings", () => {
 
     expect(JSON.stringify(persisted)).not.toContain("secret");
     expect(persisted).toEqual(migrateSettings({}));
+  });
+
+  it("clears saved reasoning effort when settings change the Codex model", () => {
+    const settings = migrateSettings({
+      providerSettings: {
+        codex: { model: "model-a", reasoningEffort: "high" },
+      },
+    });
+
+    updateCodexDefaultModel(settings, "model-b");
+
+    expect(settings.providerSettings.codex.model).toBe("model-b");
+    expect(settings.providerSettings.codex.reasoningEffort).toBe("");
   });
 });

@@ -9,6 +9,7 @@ import { detectProviderCli, getProviderOnboarding } from "../provider-onboarding
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { execFileSync } from "node:child_process";
+import { ProviderInstallLink } from "./ProviderInstallLink";
 
 interface HyoAppProps {
   app: App;
@@ -159,6 +160,9 @@ Be friendly and walk me through each step. I might not be technical.`;
           <p className="hyo-onboarding-intro">
             Hyo needs {onboarding.providerName} CLI installed to work. This is a one-time setup
             that takes about 2 minutes.
+          </p>
+          <p className="hyo-onboarding-intro">
+            <ProviderInstallLink onboarding={onboarding} />
           </p>
           <p className="hyo-onboarding-intro">
             <a href="https://www.loom.com/share/9fecabcdda3c4e83bae142d67838c2fa" target="_blank" rel="noopener">

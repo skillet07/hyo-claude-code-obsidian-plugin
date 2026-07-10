@@ -86,7 +86,13 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-export function HyoStatusBar({
+export function HyoStatusBar(props: HyoStatusBarProps) {
+  return props.provider.id === "codex"
+    ? <CodexHyoStatusBar {...props} />
+    : <ClaudeHyoStatusBar {...props} />;
+}
+
+function ClaudeHyoStatusBar({
   provider,
   providerOptions,
   model,
@@ -528,6 +534,88 @@ export function HyoStatusBar({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function CodexHyoStatusBar({
+  provider,
+  providerOptions,
+  model,
+  inputTokens,
+  contextWindow,
+  voiceMode,
+  hasVoiceApiKey,
+  onModelChange,
+  onVoiceModeToggle,
+  onCompact,
+  onReasoningEffortChange,
+  onApprovalPolicyChange,
+  onSandboxModeChange,
+  onNetworkAccessChange,
+}: HyoStatusBarProps) {
+  const [contextOpen, setContextOpen] = useState(false);
+  const contextLimit = Math.max(contextWindow ?? 0, getContextLimit(model));
+  const contextPct = inputTokens > 0
+    ? Math.min(100, (inputTokens / contextLimit) * 100)
+    : 0;
+  const contextBarClass = contextPct > 80
+    ? "danger"
+    : contextPct > 50 ? "warning" : "";
+
+  return (
+    <div className="hyo-status-bar">
+      {inputTokens > 0 && (
+        <ContextRing
+          pct={contextPct}
+          barClass={contextBarClass}
+          inputTokens={inputTokens}
+          contextLimit={contextLimit}
+          open={contextOpen}
+          popupBottom={0}
+          onToggle={() => setContextOpen((open) => !open)}
+          onCompact={() => {
+            onCompact();
+            setContextOpen(false);
+          }}
+        />
+      )}
+      <span style={{ flex: 1 }} />
+      <CodexStatusControls
+        provider={provider}
+        options={providerOptions}
+        onModelChange={onModelChange}
+        onReasoningEffortChange={onReasoningEffortChange}
+        onApprovalPolicyChange={onApprovalPolicyChange}
+        onSandboxModeChange={onSandboxModeChange}
+        onNetworkAccessChange={onNetworkAccessChange}
+      />
+      <button
+        className={`hyo-voice-toggle${voiceMode ? " active" : ""}${!hasVoiceApiKey ? " disabled" : ""}`}
+        title={!hasVoiceApiKey
+          ? "Set up voice in Hyo settings"
+          : voiceMode ? "Voice mode on" : "Voice mode off"}
+        onClick={() => {
+          if (hasVoiceApiKey) onVoiceModeToggle();
+        }}
+      >
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+          <line x1="12" y1="19" x2="12" y2="23" />
+          <line x1="8" y1="23" x2="16" y2="23" />
+        </svg>
+        <span>Voice</span>
+      </button>
     </div>
   );
 }

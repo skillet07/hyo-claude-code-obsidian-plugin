@@ -3,6 +3,16 @@ import type { ProviderId } from "./providers/types";
 
 export const CODEX_INSTALL_COMMAND =
   "curl -fsSL https://chatgpt.com/codex/install.sh | sh";
+export const CODEX_WINDOWS_INSTALL_COMMAND =
+  'powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"';
+
+export function codexInstallCommand(
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return platform === "win32"
+    ? CODEX_WINDOWS_INSTALL_COMMAND
+    : CODEX_INSTALL_COMMAND;
+}
 
 export interface ProviderOnboarding {
   providerName: string;
@@ -29,9 +39,11 @@ export function getProviderOnboarding(
       : "Open your terminal application",
     pasteInstructions: isWindows
       ? "Right-click in the PowerShell window to paste"
-      : "Press Cmd+V to paste",
+      : platform === "darwin"
+      ? "Press Cmd+V to paste"
+      : "Press Ctrl+Shift+V or right-click to paste",
     installCommand: providerId === "codex"
-      ? CODEX_INSTALL_COMMAND
+      ? codexInstallCommand(platform)
       : isWindows
       ? "irm https://claude.ai/install.ps1 | iex"
       : "curl -fsSL https://claude.ai/install.sh | bash",
@@ -49,8 +61,9 @@ export function providerCliCandidates(
   appData: string,
 ): string[] {
   const binary = providerId === "codex" ? "codex" : "claude";
-  const configuredIsCommand = configuredPath === binary;
-  const custom = configuredPath && !configuredIsCommand ? [configuredPath] : [];
+  const custom = configuredPath && isPathLike(configuredPath)
+    ? [configuredPath]
+    : [];
   if (platform === "win32") {
     const npmRoot = appData || win32.join(home, "AppData", "Roaming");
     return [...custom, win32.join(npmRoot, "npm", `${binary}.cmd`)];
@@ -76,6 +89,13 @@ export interface DetectProviderCliOptions {
 }
 
 export function detectProviderCli(options: DetectProviderCliOptions): string {
+  const binary = options.providerId === "codex" ? "codex" : "claude";
+  const configured = options.configuredPath.trim();
+  if (configured && configured !== binary) {
+    return isPathLike(configured)
+      ? options.exists(configured) ? configured : ""
+      : options.findOnPath(configured).trim();
+  }
   for (const candidate of providerCliCandidates(
     options.providerId,
     options.configuredPath,
@@ -85,6 +105,9 @@ export function detectProviderCli(options: DetectProviderCliOptions): string {
   )) {
     if (options.exists(candidate)) return candidate;
   }
-  const binary = options.providerId === "codex" ? "codex" : "claude";
   return options.findOnPath(binary).trim();
+}
+
+function isPathLike(value: string): boolean {
+  return value.includes("/") || value.includes("\\") || value.startsWith(".");
 }

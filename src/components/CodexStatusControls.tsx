@@ -82,6 +82,18 @@ export function CodexStatusControls({
     [models, options.model],
   );
 
+  const selectModel = (modelId: string) => {
+    const nextModel = models.find((model) => model.id === modelId) ??
+      (modelId ? undefined : models.find((model) => model.isDefault));
+    if (
+      options.reasoningEffort &&
+      !nextModel?.effortOptions.some((effort) => effort.id === options.reasoningEffort)
+    ) {
+      onReasoningEffortChange(undefined);
+    }
+    onModelChange(modelId);
+  };
+
   const startLogin = async (method: "browser" | "device") => {
     if (!provider.startLogin) return;
     try {
@@ -127,12 +139,18 @@ export function CodexStatusControls({
           )}
         </span>
       )}
+      {auth?.authenticated && (
+        <span className="hyo-codex-account">
+          {[auth.accountType, auth.email, auth.plan].filter(Boolean).join(" · ") ||
+            "Signed in"}
+        </span>
+      )}
       {usage && <span className="hyo-codex-usage">{Math.round(usage.usedPercent)}% used</span>}
       <select
         aria-label="Codex model"
         className="hyo-codex-select"
         value={options.model}
-        onChange={(event) => onModelChange(event.target.value)}
+        onChange={(event) => selectModel(event.target.value)}
       >
         <option value="">Server default</option>
         {models.map((model) => (

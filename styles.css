@@ -2099,6 +2099,7 @@ button.hyo-ask-send:disabled {
 .hyo-codex-network,
 .hyo-codex-usage,
 .hyo-codex-device-code,
+.hyo-codex-account,
 .hyo-codex-error {
   white-space: nowrap;
   color: var(--text-muted);

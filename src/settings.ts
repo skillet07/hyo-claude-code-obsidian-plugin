@@ -4,6 +4,7 @@ import * as path from "path";
 import * as os from "os";
 import type HyoPlugin from "./main";
 import { detectProviderCli } from "./provider-onboarding";
+import { updateCodexDefaultModel } from "./provider-settings";
 export { type HyoSettings, DEFAULT_SETTINGS } from "./provider-settings";
 
 export function dispatchSettingsChanged(): void {
@@ -175,17 +176,7 @@ export class HyoSettingTab extends PluginSettingTab {
         .setPlaceholder("Server default")
         .setValue(this.plugin.settings.providerSettings.codex.model)
         .onChange(async (value) => {
-          this.plugin.settings.providerSettings.codex.model = value.trim();
-          await this.plugin.saveSettings();
-        }));
-    new Setting(containerEl)
-      .setName("Reasoning effort")
-      .setDesc("Leave blank to use the selected model's server default.")
-      .addText((text) => text
-        .setPlaceholder("Server default")
-        .setValue(this.plugin.settings.providerSettings.codex.reasoningEffort)
-        .onChange(async (value) => {
-          this.plugin.settings.providerSettings.codex.reasoningEffort = value.trim();
+          updateCodexDefaultModel(this.plugin.settings, value);
           await this.plugin.saveSettings();
         }));
     new Setting(containerEl)

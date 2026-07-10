@@ -174,3 +174,11 @@ export function migrateSettings(value: unknown): HyoSettings {
 export function sanitizeSettingsForPersistence(value: unknown): HyoSettings {
   return migrateSettings(value);
 }
+
+export function updateCodexDefaultModel(
+  settings: HyoSettings,
+  model: string,
+): void {
+  settings.providerSettings.codex.model = model.trim();
+  settings.providerSettings.codex.reasoningEffort = "";
+}

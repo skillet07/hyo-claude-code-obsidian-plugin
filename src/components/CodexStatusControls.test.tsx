@@ -2,7 +2,7 @@ import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { CodexStatusControls } from "./CodexStatusControls";
-import type { ChatProvider } from "../providers/types";
+import type { ChatProvider, ProviderSessionOptions } from "../providers/types";
 
 let renderer: ReactTestRenderer | undefined;
 
@@ -53,13 +53,18 @@ function provider(overrides: Partial<ChatProvider> = {}): ChatProvider {
   } as ChatProvider;
 }
 
-async function mount(codex: ChatProvider, callbacks: Record<string, any> = {}) {
+async function mount(
+  codex: ChatProvider,
+  callbacks: Record<string, any> = {},
+  optionOverrides: Partial<ProviderSessionOptions> = {},
+) {
   await act(async () => {
     renderer = create(<CodexStatusControls
       provider={codex}
       options={{
         model: "", reasoningEffort: undefined, approvalPolicy: "on-request",
         sandboxMode: "workspace-write", networkAccess: false,
+        ...optionOverrides,
       }}
       onModelChange={callbacks.model ?? vi.fn()}
       onReasoningEffortChange={callbacks.effort ?? vi.fn()}
@@ -123,5 +128,47 @@ describe("CodexStatusControls", () => {
     confirm.mockReturnValue(true);
     act(() => renderer!.root.findByProps({ "aria-label": "Codex sandbox mode" }).props.onChange({ target: { value: "danger-full-access" } }));
     expect(callbacks.sandbox).toHaveBeenCalledWith("danger-full-access");
+  });
+
+  it("clears a reasoning effort unsupported by the newly selected model", async () => {
+    const callbacks = { model: vi.fn(), effort: vi.fn() };
+    await mount(provider({
+      listModels: vi.fn(async () => [
+        {
+          id: "model-a", displayName: "Model A", description: "", isDefault: true,
+          defaultEffort: "high", effortOptions: [{ id: "high", description: "" }],
+          inputModalities: ["text"], supportsPersonality: false,
+        },
+        {
+          id: "model-b", displayName: "Model B", description: "", isDefault: false,
+          defaultEffort: "low", effortOptions: [{ id: "low", description: "" }],
+          inputModalities: ["text"], supportsPersonality: false,
+        },
+      ]),
+    }), callbacks, { model: "model-a", reasoningEffort: "high" });
+
+    act(() => renderer!.root.findByProps({ "aria-label": "Codex model" }).props.onChange({
+      target: { value: "model-b" },
+    }));
+    expect(callbacks.effort).toHaveBeenCalledWith(undefined);
+    expect(callbacks.model).toHaveBeenCalledWith("model-b");
+  });
+
+  it("renders authenticated ChatGPT account details without secrets", async () => {
+    await mount(provider({
+      getAuthState: vi.fn(async () => ({
+        authenticated: true,
+        requiresAuth: true,
+        accountType: "chatgpt",
+        email: "user@example.com",
+        plan: "plus",
+      })),
+    }));
+
+    const status = renderer!.root.findByProps({ className: "hyo-codex-account" });
+    expect(status.children.join("")).toContain("chatgpt");
+    expect(status.children.join("")).toContain("user@example.com");
+    expect(status.children.join("")).toContain("plus");
+    expect(JSON.stringify(renderer!.toJSON())).not.toContain("token");
   });
 });

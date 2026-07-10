@@ -4,6 +4,7 @@ import {
 } from "node:child_process";
 import { existsSync } from "node:fs";
 import { delimiter, win32 } from "node:path";
+import { codexInstallCommand } from "../../provider-onboarding";
 
 export const MINIMUM_CODEX_CLI_VERSION = "0.144.1";
 
@@ -213,10 +214,11 @@ export async function assertCodexCliVersion(
   options: AssertCodexCliVersionOptions = {},
 ): Promise<CodexCliVersion> {
   const command = options.command ?? "codex";
+  const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
   const timeoutMs = options.timeoutMs ?? DEFAULT_CODEX_VERSION_TIMEOUT_MS;
   const spec = buildCodexProcessSpec(command, ["--version"], {
-    platform: options.platform,
+    platform,
     env,
     fileExists: options.fileExists,
     comspec: options.comspec,
@@ -253,7 +255,7 @@ export async function assertCodexCliVersion(
   const minimum = parseCodexVersion(MINIMUM_CODEX_CLI_VERSION);
   if (compareVersions(version, minimum) < 0) {
     throw new CodexCliUnavailableError(
-      `Found ${version.raw}, but Hyo requires ${MINIMUM_CODEX_CLI_VERSION} or newer. Update with: curl -fsSL https://chatgpt.com/codex/install.sh | sh — then restart Obsidian.`,
+      `Found ${version.raw}, but Hyo requires ${MINIMUM_CODEX_CLI_VERSION} or newer. Update with: ${codexInstallCommand(platform)} — then restart Obsidian.`,
     );
   }
   return version;

@@ -63,6 +63,15 @@ describe("Codex CLI version checks", () => {
     );
   });
 
+  it("gives the official PowerShell update command for an old Windows CLI", async () => {
+    await expect(assertCodexCliVersion({
+      platform: "win32",
+      runVersion: () => "codex-cli 0.144.0",
+    })).rejects.toThrow(
+      'powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"',
+    );
+  });
+
   it("does not treat a prerelease as satisfying the stable minimum", async () => {
     await expect(
       assertCodexCliVersion({ runVersion: () => "codex-cli 0.144.1-beta.1" }),
