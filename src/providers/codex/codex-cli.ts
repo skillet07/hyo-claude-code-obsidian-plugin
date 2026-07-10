@@ -1,4 +1,7 @@
-import { spawnSync } from "node:child_process";
+import {
+  spawn as nodeSpawn,
+  type SpawnOptions,
+} from "node:child_process";
 import { existsSync } from "node:fs";
 import { delimiter, win32 } from "node:path";
 
@@ -19,11 +22,17 @@ export interface AssertCodexCliVersionOptions {
   platform?: NodeJS.Platform;
   fileExists?: (path: string) => boolean;
   comspec?: string;
+  terminationGraceMs?: number;
+  probeSpawn?: CodexProbeSpawn;
+  runTerminationCommand?: (
+    file: string,
+    args: string[],
+  ) => Promise<void>;
   runVersion?: (
     spec: CodexProcessSpec,
     env: NodeJS.ProcessEnv,
     timeoutMs: number,
-  ) => string;
+  ) => string | Promise<string>;
 }
 
 export class CodexCliUnavailableError extends Error {
@@ -42,6 +51,49 @@ export interface CodexProcessSpec {
   windowsVerbatimArguments?: boolean;
 }
 
+export interface CodexProbeReadable {
+  on(event: "data", listener: (chunk: Uint8Array | string) => void): this;
+}
+
+export interface CodexProbeProcess {
+  pid?: number;
+  stdout: CodexProbeReadable;
+  stderr: CodexProbeReadable;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(
+    event: "close",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): this;
+  kill(signal: NodeJS.Signals): boolean;
+}
+
+export type CodexProbeSpawn = (
+  file: string,
+  args: string[],
+  options: SpawnOptions,
+) => CodexProbeProcess;
+
+export interface ProbeCodexVersionOptions {
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  terminationGraceMs?: number;
+  spawn?: CodexProbeSpawn;
+  runTerminationCommand?: (
+    file: string,
+    args: string[],
+  ) => Promise<void>;
+}
+
+export class CodexCliProbeTimeoutError extends Error {
+  constructor(
+    public readonly timeoutMs: number,
+    public readonly cause?: unknown,
+  ) {
+    super(`Codex CLI version probe timed out after ${timeoutMs}ms`);
+    this.name = "CodexCliProbeTimeoutError";
+  }
+}
+
 export interface CodexProcessSpecOptions {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
@@ -50,6 +102,95 @@ export interface CodexProcessSpecOptions {
 }
 
 export const DEFAULT_CODEX_VERSION_TIMEOUT_MS = 3_000;
+const DEFAULT_PROBE_TERMINATION_GRACE_MS = 500;
+const MAX_PROBE_OUTPUT_BYTES = 64 * 1024;
+
+export function probeCodexVersion(
+  spec: CodexProcessSpec,
+  options: ProbeCodexVersionOptions,
+): Promise<string> {
+  const spawn = options.spawn ?? (nodeSpawn as unknown as CodexProbeSpawn);
+  const child = spawn(spec.file, spec.args, {
+    env: options.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+    windowsVerbatimArguments: spec.windowsVerbatimArguments,
+  });
+  let stdout: Buffer = Buffer.alloc(0);
+  let stderr: Buffer = Buffer.alloc(0);
+  let closed = false;
+  let resolveClosed!: () => void;
+  const closedPromise = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+
+  const append = (existing: Buffer, chunk: Uint8Array | string): Buffer => {
+    const combined = Buffer.concat([existing, Buffer.from(chunk)]);
+    return combined.length > MAX_PROBE_OUTPUT_BYTES
+      ? combined.subarray(combined.length - MAX_PROBE_OUTPUT_BYTES)
+      : combined;
+  };
+  child.stdout.on("data", (chunk) => {
+    stdout = append(stdout, chunk);
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr = append(stderr, chunk);
+  });
+
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    let timedOut = false;
+    const settle = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    child.on("error", (error) => {
+      if (!timedOut) settle(() => reject(error));
+    });
+    child.on("close", (code, signal) => {
+      if (!closed) {
+        closed = true;
+        resolveClosed();
+      }
+      if (timedOut) return;
+      if (code === 0) {
+        settle(() => resolve(stdout.toString("utf8")));
+      } else {
+        const detail = stderr.toString("utf8").trim();
+        settle(() =>
+          reject(
+            new Error(
+              detail ||
+                `Codex CLI version probe exited with status ${String(code)}${
+                  signal ? ` (${signal})` : ""
+                }`,
+            ),
+          ),
+        );
+      }
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      void terminateTimedOutProbe(
+        child,
+        spec,
+        closedPromise,
+        () => closed,
+        options.terminationGraceMs ?? DEFAULT_PROBE_TERMINATION_GRACE_MS,
+        options.runTerminationCommand,
+      ).then(
+        () => settle(() => reject(new CodexCliProbeTimeoutError(options.timeoutMs))),
+        (error: unknown) =>
+          settle(() =>
+            reject(new CodexCliProbeTimeoutError(options.timeoutMs, error)),
+          ),
+      );
+    }, options.timeoutMs);
+  });
+}
 
 export function parseCodexVersion(output: string): CodexCliVersion {
   const match = output.match(/\b(\d+)\.(\d+)\.(\d+)([-+][0-9A-Za-z.-]+)?\b/);
@@ -68,9 +209,9 @@ export function parseCodexVersion(output: string): CodexCliVersion {
   };
 }
 
-export function assertCodexCliVersion(
+export async function assertCodexCliVersion(
   options: AssertCodexCliVersionOptions = {},
-): CodexCliVersion {
+): Promise<CodexCliVersion> {
   const command = options.command ?? "codex";
   const env = options.env ?? process.env;
   const timeoutMs = options.timeoutMs ?? DEFAULT_CODEX_VERSION_TIMEOUT_MS;
@@ -82,34 +223,18 @@ export function assertCodexCliVersion(
   });
   const runVersion =
     options.runVersion ??
-    ((commandSpec: CodexProcessSpec, commandEnv: NodeJS.ProcessEnv) => {
-      const result = spawnSync(commandSpec.file, commandSpec.args, {
-        encoding: "utf8",
+    ((commandSpec: CodexProcessSpec, commandEnv: NodeJS.ProcessEnv) =>
+      probeCodexVersion(commandSpec, {
         env: commandEnv,
-        timeout: timeoutMs,
-        windowsHide: true,
-        windowsVerbatimArguments: commandSpec.windowsVerbatimArguments,
-      });
-      if (result.error) throw result.error;
-      if (result.status !== 0) {
-        throw Object.assign(
-          new Error(
-            result.stderr.trim() ||
-              `Codex CLI version probe exited with status ${String(result.status)}`,
-          ),
-          {
-            status: result.status,
-            signal: result.signal,
-            stderr: result.stderr,
-          },
-        );
-      }
-      return result.stdout;
-    });
+        timeoutMs,
+        terminationGraceMs: options.terminationGraceMs,
+        spawn: options.probeSpawn,
+        runTerminationCommand: options.runTerminationCommand,
+      }));
 
   let output: string;
   try {
-    output = runVersion(spec, env, timeoutMs);
+    output = await runVersion(spec, env, timeoutMs);
   } catch (error) {
     const detail = error instanceof Error ? ` (${error.message})` : "";
     if (isTimeoutError(error)) {
@@ -245,4 +370,92 @@ function isTimeoutError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const code = (error as Error & { code?: unknown }).code;
   return code === "ETIMEDOUT" || /ETIMEDOUT|timed out/i.test(error.message);
+}
+
+async function terminateTimedOutProbe(
+  child: CodexProbeProcess,
+  spec: CodexProcessSpec,
+  closed: Promise<void>,
+  isClosed: () => boolean,
+  graceMs: number,
+  runTerminationCommand = runProbeTerminationCommand,
+): Promise<void> {
+  if (isClosed()) return;
+  if (spec.windowsVerbatimArguments === true) {
+    if (child.pid === undefined) {
+      throw new Error(
+        "Cannot tree-terminate timed-out Windows Codex probe: child PID is unavailable.",
+      );
+    }
+    const termination = await settlesWithin(
+      runTerminationCommand("taskkill.exe", [
+        "/PID",
+        String(child.pid),
+        "/T",
+        "/F",
+      ]),
+      graceMs,
+    );
+    if (!termination) {
+      throw new Error(
+        `taskkill.exe did not finish while terminating timed-out Codex probe PID ${child.pid}`,
+      );
+    }
+    if (termination.error) throw termination.error;
+    return;
+  }
+
+  child.kill("SIGTERM");
+  if (await resolvesWithin(closed, graceMs)) return;
+  child.kill("SIGKILL");
+}
+
+function runProbeTerminationCommand(
+  file: string,
+  args: string[],
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const command = nodeSpawn(file, args, {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    command.on("error", reject);
+    command.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${file} exited with status ${String(code)}`));
+    });
+  });
+}
+
+async function resolvesWithin(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const result = await Promise.race([
+    promise.then(() => true),
+    new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return result;
+}
+
+async function settlesWithin(
+  promise: Promise<void>,
+  timeoutMs: number,
+): Promise<{ error?: unknown } | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const result = await Promise.race([
+    promise.then(
+      () => ({}),
+      (error: unknown) => ({ error }),
+    ),
+    new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), timeoutMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return result;
 }

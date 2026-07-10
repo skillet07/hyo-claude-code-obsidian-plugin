@@ -16,6 +16,7 @@ export interface AppServerWritable {
 }
 
 export interface AppServerChildProcess {
+  pid?: number;
   stdin: AppServerWritable;
   stdout: AppServerReadable;
   stderr: AppServerReadable;
@@ -46,11 +47,16 @@ export interface SpawnCodexAppServerOptions {
   env?: NodeJS.ProcessEnv;
   maxStderrBytes?: number;
   shutdownTimeoutMs?: number;
+  forceKillGraceMs?: number;
   spawn?: AppServerSpawn;
-  versionCheck?: (command: string, env: NodeJS.ProcessEnv) => void;
+  versionCheck?: (
+    command: string,
+    env: NodeJS.ProcessEnv,
+  ) => void | Promise<void>;
   platform?: NodeJS.Platform;
   fileExists?: (path: string) => boolean;
   comspec?: string;
+  runTerminationCommand?: RunTerminationCommand;
 }
 
 export interface CodexAppServerProcess {
@@ -62,10 +68,26 @@ export interface CodexAppServerProcess {
 
 const DEFAULT_MAX_STDERR_BYTES = 64 * 1024;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 2_000;
+const DEFAULT_FORCE_KILL_GRACE_MS = 1_000;
 
-export function spawnCodexAppServer(
+export type RunTerminationCommand = (
+  file: string,
+  args: string[],
+) => Promise<void>;
+
+export class AppServerLifecycleError extends Error {
+  constructor(
+    message: string,
+    public readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = "AppServerLifecycleError";
+  }
+}
+
+export async function spawnCodexAppServer(
   options: SpawnCodexAppServerOptions = {},
-): CodexAppServerProcess {
+): Promise<CodexAppServerProcess> {
   const command = options.command ?? "codex";
   const platform = options.platform ?? process.platform;
   const sourceEnv = options.env ?? process.env;
@@ -78,17 +100,16 @@ export function spawnCodexAppServer(
       sourceEnv.APPDATA,
     ),
   };
-  (
+  await (
     options.versionCheck ??
-    ((binary, commandEnv) => {
+    ((binary, commandEnv) =>
       assertCodexCliVersion({
         command: binary,
         env: commandEnv,
         platform,
         fileExists: options.fileExists,
         comspec: options.comspec,
-      });
-    })
+      }))
   )(command, env);
   const commandSpec = buildCodexProcessSpec(
     command,
@@ -111,25 +132,80 @@ export function spawnCodexAppServer(
 
   const maxStderrBytes = options.maxStderrBytes ?? DEFAULT_MAX_STDERR_BYTES;
   let stderr = Buffer.alloc(0);
-  let exited = false;
+  let closed = false;
+  let reported = false;
+  let failure: Error | undefined;
   let resolveExit!: (exit: AppServerExit) => void;
   const exit = new Promise<AppServerExit>((resolve) => {
     resolveExit = resolve;
   });
+  let resolveClosed!: (exit: AppServerExit) => void;
+  const closedPromise = new Promise<AppServerExit>((resolve) => {
+    resolveClosed = resolve;
+  });
 
-  const settle = (
+  const makeReport = (
     code: number | null,
     signal: NodeJS.Signals | null,
-    error?: Error,
+    error = failure,
+  ): AppServerExit => ({
+    code,
+    signal,
+    stderr: stderr.toString("utf8"),
+    ...(error ? { error } : {}),
+  });
+
+  const reportFailure = (error: Error) => {
+    if (reported) return;
+    failure = error;
+    reported = true;
+    resolveExit(makeReport(null, null, error));
+  };
+
+  const reportClose = (
+    code: number | null,
+    signal: NodeJS.Signals | null,
   ) => {
-    if (exited) return;
-    exited = true;
-    resolveExit({
-      code,
-      signal,
-      stderr: stderr.toString("utf8"),
-      ...(error ? { error } : {}),
+    if (closed) return;
+    closed = true;
+    const report = makeReport(code, signal);
+    resolveClosed(report);
+    if (!reported) {
+      reported = true;
+      resolveExit(report);
+    }
+  };
+
+  let stopPromise: Promise<AppServerExit> | undefined;
+  const stop = (): Promise<AppServerExit> => {
+    if (stopPromise) return stopPromise;
+    let resolveStop!: (report: AppServerExit) => void;
+    let rejectStop!: (error: Error) => void;
+    stopPromise = new Promise<AppServerExit>((resolve, reject) => {
+      resolveStop = resolve;
+      rejectStop = reject;
     });
+    void stopChild({
+      child,
+      closed: closedPromise,
+      isClosed: () => closed,
+      isWindowsShim: commandSpec.windowsVerbatimArguments === true,
+      shutdownTimeoutMs:
+        options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS,
+      forceKillGraceMs:
+        options.forceKillGraceMs ?? DEFAULT_FORCE_KILL_GRACE_MS,
+      runTerminationCommand:
+        options.runTerminationCommand ?? runTerminationCommand,
+      failure: () => failure,
+    }).then(resolveStop, (error: unknown) => {
+      const lifecycleError =
+        error instanceof Error
+          ? error
+          : new AppServerLifecycleError(String(error), failure);
+      reportFailure(lifecycleError);
+      rejectStop(lifecycleError);
+    });
+    return stopPromise;
   };
 
   child.stderr.on("data", (chunk) => {
@@ -140,45 +216,108 @@ export function spawnCodexAppServer(
     }
   });
   child.stdin.on("error", (error) => {
-    if (exited) return;
-    settle(null, null, error);
-    child.kill("SIGTERM");
+    if (closed) return;
+    reportFailure(error);
+    void stop().catch(() => undefined);
   });
-  child.on("error", (error) => settle(null, null, error));
-  child.on("close", (code, signal) => settle(code, signal));
-
-  let stopPromise: Promise<AppServerExit> | undefined;
-  const stop = () => {
-    stopPromise ??= stopChild(
-      child,
-      exit,
-      () => exited,
-      options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS,
-      settle,
-    );
-    return stopPromise;
-  };
+  child.on("error", (error) => {
+    if (closed) return;
+    reportFailure(error);
+    void stop().catch(() => undefined);
+  });
+  child.on("close", reportClose);
 
   return { stdin: child.stdin, stdout: child.stdout, exit, stop };
 }
 
-async function stopChild(
-  child: AppServerChildProcess,
-  exit: Promise<AppServerExit>,
-  hasExited: () => boolean,
-  timeoutMs: number,
-  settle: (code: null, signal: NodeJS.Signals) => void,
-): Promise<AppServerExit> {
-  if (hasExited()) return exit;
-  child.stdin.end();
-  if (!hasExited()) child.kill("SIGTERM");
-  if (await resolvesBefore(exit, timeoutMs)) return exit;
+interface StopChildOptions {
+  child: AppServerChildProcess;
+  closed: Promise<AppServerExit>;
+  isClosed: () => boolean;
+  isWindowsShim: boolean;
+  shutdownTimeoutMs: number;
+  forceKillGraceMs: number;
+  runTerminationCommand: RunTerminationCommand;
+  failure: () => Error | undefined;
+}
 
-  if (!hasExited()) child.kill("SIGKILL");
-  if (await resolvesBefore(exit, timeoutMs)) return exit;
+async function stopChild(options: StopChildOptions): Promise<AppServerExit> {
+  if (options.isClosed()) return options.closed;
+  options.child.stdin.end();
 
-  settle(null, "SIGKILL");
-  return exit;
+  if (options.isWindowsShim) {
+    if (await resolvesBefore(options.closed, options.shutdownTimeoutMs)) {
+      return options.closed;
+    }
+    const pid = options.child.pid;
+    if (pid === undefined) {
+      throw new AppServerLifecycleError(
+        "Cannot terminate the Windows Codex command shim tree: child PID is unavailable for taskkill.exe.",
+        options.failure(),
+      );
+    }
+    const termination = await settlesBefore(
+      options.runTerminationCommand("taskkill.exe", [
+        "/PID",
+        String(pid),
+        "/T",
+        "/F",
+      ]),
+      options.forceKillGraceMs,
+    );
+    if (!termination) {
+      throw new AppServerLifecycleError(
+        `taskkill.exe did not finish while terminating Windows Codex process tree for PID ${pid}.`,
+        options.failure(),
+      );
+    }
+    if (termination.error) {
+      throw new AppServerLifecycleError(
+        `Failed to terminate Windows Codex process tree for PID ${pid} with taskkill.exe.`,
+        termination.error,
+      );
+    }
+    if (await resolvesBefore(options.closed, options.forceKillGraceMs)) {
+      return options.closed;
+    }
+    throw new AppServerLifecycleError(
+      `Windows Codex process tree for PID ${pid} did not close after taskkill.exe.`,
+      options.failure(),
+    );
+  }
+
+  options.child.kill("SIGTERM");
+  if (await resolvesBefore(options.closed, options.shutdownTimeoutMs)) {
+    return options.closed;
+  }
+  options.child.kill("SIGKILL");
+  if (await resolvesBefore(options.closed, options.forceKillGraceMs)) {
+    return options.closed;
+  }
+  throw new AppServerLifecycleError(
+    "Codex app-server did not close after SIGTERM and SIGKILL.",
+    options.failure(),
+  );
+}
+
+function runTerminationCommand(file: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const command = nodeSpawn(file, args, {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    command.on("error", reject);
+    command.on("close", (code) => {
+      if (code === 0) resolve();
+      else {
+        reject(
+          new AppServerLifecycleError(
+            `${file} exited with status ${String(code)} while terminating Codex.`,
+          ),
+        );
+      }
+    });
+  });
 }
 
 async function resolvesBefore(
@@ -190,6 +329,24 @@ async function resolvesBefore(
     promise.then(() => true),
     new Promise<false>((resolve) => {
       timer = setTimeout(() => resolve(false), timeoutMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return result;
+}
+
+async function settlesBefore(
+  promise: Promise<void>,
+  timeoutMs: number,
+): Promise<{ error?: unknown } | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const result = await Promise.race([
+    promise.then(
+      () => ({}),
+      (error: unknown) => ({ error }),
+    ),
+    new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), timeoutMs);
     }),
   ]);
   if (timer) clearTimeout(timer);

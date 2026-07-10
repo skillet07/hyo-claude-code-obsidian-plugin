@@ -1,6 +1,9 @@
-import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { replaceGeneratedTypesAtomically } from "./codex-typegen-lib.mjs";
+import {
+  getCodexCliCommand,
+  replaceGeneratedTypesAtomically,
+  runTypegenCommandSync,
+} from "./codex-typegen-lib.mjs";
 
 const generatorVersion = "0.144.1";
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -8,9 +11,9 @@ const outputDirectory = fileURLToPath(
   new URL("../src/providers/codex/generated", import.meta.url),
 );
 
-const versionOutput = execFileSync("codex", ["--version"], {
+const codexCommand = getCodexCliCommand(process.env);
+const versionOutput = runTypegenCommandSync(codexCommand, ["--version"], {
   cwd: projectRoot,
-  encoding: "utf8",
   timeout: 3_000,
 }).trim();
 const match = versionOutput.match(/\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/);
@@ -24,8 +27,8 @@ const result = replaceGeneratedTypesAtomically({
   outputDirectory,
   generatorVersion,
   generateInto: (temporaryOutput) => {
-    execFileSync(
-      "codex",
+    runTypegenCommandSync(
+      codexCommand,
       ["app-server", "generate-ts", "--out", temporaryOutput],
       { cwd: projectRoot, stdio: "inherit" },
     );

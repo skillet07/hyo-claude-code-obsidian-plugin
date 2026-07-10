@@ -1,13 +1,29 @@
+import { EventEmitter } from "node:events";
 import { delimiter, win32 } from "node:path";
-import { describe, expect, it } from "vitest";
+import { PassThrough } from "node:stream";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildCodexProcessSpec,
+  type CodexProbeSpawn,
   CodexCliUnavailableError,
   MINIMUM_CODEX_CLI_VERSION,
   assertCodexCliVersion,
   buildElectronSafePath,
   parseCodexVersion,
+  probeCodexVersion,
 } from "./codex-cli";
+
+class FakeProbeProcess extends EventEmitter {
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly killCalls: NodeJS.Signals[] = [];
+  readonly pid = 2468;
+
+  kill(signal: NodeJS.Signals): boolean {
+    this.killCalls.push(signal);
+    return true;
+  }
+}
 
 describe("Codex CLI version checks", () => {
   it("parses Codex CLI semantic versions", () => {
@@ -31,38 +47,38 @@ describe("Codex CLI version checks", () => {
     );
   });
 
-  it("accepts the minimum supported version", () => {
-    expect(
+  it("accepts the minimum supported version", async () => {
+    await expect(
       assertCodexCliVersion({
         runVersion: () => "codex-cli 0.144.1",
       }),
-    ).toMatchObject({ raw: MINIMUM_CODEX_CLI_VERSION });
+    ).resolves.toMatchObject({ raw: MINIMUM_CODEX_CLI_VERSION });
   });
 
-  it("does not treat a prerelease as satisfying the stable minimum", () => {
-    expect(() =>
+  it("does not treat a prerelease as satisfying the stable minimum", async () => {
+    await expect(
       assertCodexCliVersion({ runVersion: () => "codex-cli 0.144.1-beta.1" }),
-    ).toThrow(/requires 0\.144\.1/);
+    ).rejects.toThrow(/requires 0\.144\.1/);
   });
 
-  it("reports an actionable error for an old CLI", () => {
-    expect(() =>
+  it("reports an actionable error for an old CLI", async () => {
+    await expect(
       assertCodexCliVersion({ runVersion: () => "codex-cli 0.143.9" }),
-    ).toThrow(/Found 0\.143\.9.*requires 0\.144\.1.*update/i);
+    ).rejects.toThrow(/Found 0\.143\.9.*requires 0\.144\.1.*update/i);
   });
 
-  it("reports an actionable error when the CLI is missing", () => {
+  it("reports an actionable error when the CLI is missing", async () => {
     const missing = Object.assign(new Error("spawn codex ENOENT"), { code: "ENOENT" });
-    expect(() =>
+    await expect(
       assertCodexCliVersion({
         runVersion: () => {
           throw missing;
         },
       }),
-    ).toThrow(/Codex CLI was not found.*install.*PATH/i);
+    ).rejects.toThrow(/Codex CLI was not found.*install.*PATH/i);
   });
 
-  it("uses a bounded timeout and preserves timeout details", () => {
+  it("uses a bounded timeout and preserves timeout details", async () => {
     const timeout = Object.assign(new Error("spawnSync codex ETIMEDOUT"), {
       code: "ETIMEDOUT",
       signal: "SIGTERM",
@@ -70,7 +86,7 @@ describe("Codex CLI version checks", () => {
     let caught: unknown;
 
     try {
-      assertCodexCliVersion({
+      await assertCodexCliVersion({
         timeoutMs: 250,
         runVersion: (_spec, _env, timeoutMs) => {
           expect(timeoutMs).toBe(250);
@@ -86,7 +102,75 @@ describe("Codex CLI version checks", () => {
     expect((caught as Error).message).toMatch(/timed out after 250ms.*ETIMEDOUT/i);
   });
 
-  it("resolves and safely wraps a Windows npm cmd shim", () => {
+  it("asynchronously force-kills a version probe that never closes", async () => {
+    vi.useFakeTimers();
+    const child = new FakeProbeProcess();
+    const spawn = vi.fn<CodexProbeSpawn>(() => child);
+    const probe = probeCodexVersion(
+      { file: "codex", args: ["--version"] },
+      {
+        env: {},
+        timeoutMs: 10,
+        terminationGraceMs: 5,
+        spawn,
+      },
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    await vi.advanceTimersByTimeAsync(15);
+
+    expect(child.killCalls).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(await probe).toMatchObject({
+      name: "CodexCliProbeTimeoutError",
+      timeoutMs: 10,
+    });
+    vi.useRealTimers();
+  });
+
+  it("bounds Windows probe tree termination when taskkill hangs", async () => {
+    vi.useFakeTimers();
+    const child = new FakeProbeProcess();
+    const runTerminationCommand = vi.fn(
+      () => new Promise<void>(() => undefined),
+    );
+    const probe = probeCodexVersion(
+      {
+        file: "cmd.exe",
+        args: ["/d", "/s", "/c", '""C:\\npm\\codex.cmd" --version"'],
+        windowsVerbatimArguments: true,
+      },
+      {
+        env: {},
+        timeoutMs: 10,
+        terminationGraceMs: 5,
+        spawn: () => child,
+        runTerminationCommand,
+      },
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    await vi.advanceTimersByTimeAsync(15);
+
+    expect(runTerminationCommand).toHaveBeenCalledWith("taskkill.exe", [
+      "/PID",
+      "2468",
+      "/T",
+      "/F",
+    ]);
+    expect(await probe).toMatchObject({
+      name: "CodexCliProbeTimeoutError",
+      cause: expect.objectContaining({
+        message: expect.stringMatching(/taskkill.*did not finish/i),
+      }),
+    });
+    vi.useRealTimers();
+  });
+
+  it("resolves and safely wraps a Windows npm cmd shim", async () => {
     const shim = win32.join("C:\\npm", "codex.CMD");
     const spec = buildCodexProcessSpec("codex", ["--version"], {
       platform: "win32",
@@ -105,7 +189,7 @@ describe("Codex CLI version checks", () => {
     });
 
     let probedSpec: unknown;
-    expect(
+    await expect(
       assertCodexCliVersion({
         command: "codex",
         platform: "win32",
@@ -120,7 +204,7 @@ describe("Codex CLI version checks", () => {
           return "codex-cli 0.144.1";
         },
       }),
-    ).toMatchObject({ raw: "0.144.1" });
+    ).resolves.toMatchObject({ raw: "0.144.1" });
     expect(probedSpec).toEqual(spec);
   });
 

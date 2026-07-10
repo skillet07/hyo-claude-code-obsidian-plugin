@@ -9,10 +9,77 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { basename, dirname, join } from "node:path";
+import { spawnSync as nodeSpawnSync } from "node:child_process";
+import { basename, dirname, join, win32 } from "node:path";
 
 const postprocessNote =
   "// HYO POSTPROCESS: JSON 64-bit integer wire declarations normalized to number; see HYO_WIRE_TYPES.md.\n";
+
+export function getCodexCliCommand(env = process.env) {
+  return env.CODEX_CLI_PATH?.trim() || "codex";
+}
+
+export function buildTypegenCommandSpec(
+  command,
+  args,
+  {
+    platform = process.platform,
+    env = process.env,
+    fileExists = existsSync,
+    comspec,
+  } = {},
+) {
+  if (platform !== "win32") return { file: command, args };
+  const resolved = resolveWindowsCommand(command, env, fileExists);
+  if (!/\.(?:cmd|bat)$/i.test(resolved)) return { file: resolved, args };
+
+  assertSafeWindowsToken(resolved);
+  for (const argument of args) assertSafeWindowsToken(argument);
+  const argumentText = args.map(quoteWindowsToken).join(" ");
+  return {
+    file: comspec ?? env.ComSpec ?? env.COMSPEC ?? "cmd.exe",
+    args: [
+      "/d",
+      "/s",
+      "/c",
+      `""${resolved}"${argumentText ? ` ${argumentText}` : ""}"`,
+    ],
+    windowsVerbatimArguments: true,
+  };
+}
+
+export function runTypegenCommandSync(
+  command,
+  args,
+  {
+    platform = process.platform,
+    env = process.env,
+    cwd,
+    timeout,
+    stdio,
+    spawnSync = nodeSpawnSync,
+  } = {},
+) {
+  const spec = buildTypegenCommandSpec(command, args, { platform, env });
+  const result = spawnSync(spec.file, spec.args, {
+    cwd,
+    env,
+    encoding: stdio === "inherit" ? undefined : "utf8",
+    stdio,
+    timeout,
+    windowsHide: true,
+    windowsVerbatimArguments: spec.windowsVerbatimArguments,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const stderr = typeof result.stderr === "string" ? result.stderr.trim() : "";
+    throw new Error(
+      stderr ||
+        `Codex type generation command exited with status ${String(result.status)}`,
+    );
+  }
+  return typeof result.stdout === "string" ? result.stdout : "";
+}
 
 export function replaceGeneratedTypesAtomically({
   outputDirectory,
@@ -117,4 +184,37 @@ function listTypeScriptFiles(directory) {
     else if (entry.isFile() && entry.name.endsWith(".ts")) files.push(path);
   }
   return files;
+}
+
+function resolveWindowsCommand(command, env, fileExists) {
+  if (
+    command.includes("\\") ||
+    command.includes("/") ||
+    /\.[A-Za-z0-9]+$/.test(command)
+  ) {
+    return command;
+  }
+  const extensions = (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+    .split(win32.delimiter)
+    .filter(Boolean);
+  for (const directory of (env.PATH ?? "").split(win32.delimiter)) {
+    if (!directory) continue;
+    for (const extension of extensions) {
+      const candidate = win32.join(directory, `${command}${extension}`);
+      if (fileExists(candidate)) return candidate;
+    }
+  }
+  return command;
+}
+
+function assertSafeWindowsToken(value) {
+  if (/["&|<>^%!\r\n]/.test(value)) {
+    throw new Error(
+      `Unsafe Windows command text cannot be passed through a Codex npm shim: ${JSON.stringify(value)}`,
+    );
+  }
+}
+
+function quoteWindowsToken(value) {
+  return /\s/.test(value) ? `"${value}"` : value;
 }

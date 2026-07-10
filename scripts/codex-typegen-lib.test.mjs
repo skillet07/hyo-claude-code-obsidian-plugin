@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { replaceGeneratedTypesAtomically } from "./codex-typegen-lib.mjs";
+import {
+  buildTypegenCommandSpec,
+  getCodexCliCommand,
+  replaceGeneratedTypesAtomically,
+} from "./codex-typegen-lib.mjs";
 
 const temporaryRoots = [];
 
@@ -81,5 +85,30 @@ describe("replaceGeneratedTypesAtomically", () => {
     expect(readFileSync(join(outputDirectory, "HYO_WIRE_TYPES.md"), "utf8")).toMatch(
       /JSON numbers.*bigint.*number/is,
     );
+  });
+});
+
+describe("Windows Codex typegen command", () => {
+  it("honors CODEX_CLI_PATH and safely wraps a cmd shim", () => {
+    const command = getCodexCliCommand({
+      CODEX_CLI_PATH: "C:\\npm tools\\codex.cmd",
+    });
+
+    expect(command).toBe("C:\\npm tools\\codex.cmd");
+    expect(
+      buildTypegenCommandSpec(command, ["app-server", "generate-ts"], {
+        platform: "win32",
+        env: { ComSpec: "C:\\Windows\\System32\\cmd.exe" },
+      }),
+    ).toEqual({
+      file: "C:\\Windows\\System32\\cmd.exe",
+      args: [
+        "/d",
+        "/s",
+        "/c",
+        '""C:\\npm tools\\codex.cmd" app-server generate-ts"',
+      ],
+      windowsVerbatimArguments: true,
+    });
   });
 });

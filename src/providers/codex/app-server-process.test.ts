@@ -31,32 +31,41 @@ class FakeProcess extends EventEmitter {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly killCalls: NodeJS.Signals[] = [];
+  readonly pid: number | undefined;
+
+  constructor(
+    private readonly closeOnKill = true,
+    pid: number | null = 1234,
+  ) {
+    super();
+    this.pid = pid ?? undefined;
+  }
 
   kill(signal: NodeJS.Signals): boolean {
     this.killCalls.push(signal);
-    queueMicrotask(() => this.emit("close", 0, signal));
+    if (this.closeOnKill) queueMicrotask(() => this.emit("close", 0, signal));
     return true;
   }
 }
 
 describe("spawnCodexAppServer", () => {
-  it("checks the CLI version before spawning and does not fall back", () => {
+  it("checks the CLI version before spawning and does not fall back", async () => {
     const spawn = vi.fn<AppServerSpawn>();
     const versionCheck = vi.fn(() => {
       throw new Error("Codex CLI is too old");
     });
 
-    expect(() => spawnCodexAppServer({ spawn, versionCheck })).toThrow(
+    await expect(spawnCodexAppServer({ spawn, versionCheck })).rejects.toThrow(
       "Codex CLI is too old",
     );
     expect(spawn).not.toHaveBeenCalled();
   });
 
-  it("spawns the documented stdio server with cwd and Electron-safe env", () => {
+  it("spawns the documented stdio server with cwd and Electron-safe env", async () => {
     const child = new FakeProcess();
     const spawn = vi.fn<AppServerSpawn>(() => child);
 
-    spawnCodexAppServer({
+    await spawnCodexAppServer({
       cwd: "/vault",
       env: { PATH: "/custom/bin", CUSTOM: "yes", HOME: "/Users/tester" },
       spawn,
@@ -77,12 +86,12 @@ describe("spawnCodexAppServer", () => {
     expect(env.PATH).toContain("/custom/bin");
   });
 
-  it("uses the safe Windows shim spec for app-server spawn", () => {
+  it("uses the safe Windows shim spec for app-server spawn", async () => {
     const child = new FakeProcess();
     const spawn = vi.fn<AppServerSpawn>(() => child);
     const shim = win32.join("C:\\npm", "codex.CMD");
 
-    spawnCodexAppServer({
+    await spawnCodexAppServer({
       env: { PATH: "C:\\npm", PATHEXT: ".EXE;.CMD" },
       platform: "win32",
       fileExists: (path) => path === shim,
@@ -105,7 +114,7 @@ describe("spawnCodexAppServer", () => {
 
   it("captures bounded stderr and reports close details", async () => {
     const child = new FakeProcess();
-    const server = spawnCodexAppServer({
+    const server = await spawnCodexAppServer({
       spawn: () => child,
       maxStderrBytes: 11,
       versionCheck: () => undefined,
@@ -124,7 +133,7 @@ describe("spawnCodexAppServer", () => {
 
   it("reports process errors once even if close follows", async () => {
     const child = new FakeProcess();
-    const server = spawnCodexAppServer({
+    const server = await spawnCodexAppServer({
       spawn: () => child,
       versionCheck: () => undefined,
     });
@@ -142,7 +151,7 @@ describe("spawnCodexAppServer", () => {
 
   it("captures stdin EPIPE during a write-close race", async () => {
     const child = new FakeProcess();
-    const server = spawnCodexAppServer({
+    const server = await spawnCodexAppServer({
       spawn: () => child,
       versionCheck: () => undefined,
     });
@@ -164,9 +173,127 @@ describe("spawnCodexAppServer", () => {
     expect(child.killCalls).toEqual(["SIGTERM"]);
   });
 
+  it("escalates after stdin EPIPE when the OS child never closes", async () => {
+    vi.useFakeTimers();
+    const child = new FakeProcess(false);
+    const server = await spawnCodexAppServer({
+      spawn: () => child,
+      versionCheck: () => undefined,
+      shutdownTimeoutMs: 10,
+      forceKillGraceMs: 10,
+    });
+    const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+
+    child.stdin.emit("error", error);
+    const stopped = server.stop().then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(child.killCalls).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(await stopped).toMatchObject({
+      name: "AppServerLifecycleError",
+      cause: error,
+    });
+    vi.useRealTimers();
+  });
+
+  it("tree-terminates a Windows shim exactly once after graceful timeout", async () => {
+    vi.useFakeTimers();
+    const child = new FakeProcess(false, 4321);
+    const shim = win32.join("C:\\npm", "codex.CMD");
+    const runTerminationCommand = vi.fn(async () => {
+      child.emit("close", null, null);
+    });
+    const server = await spawnCodexAppServer({
+      env: { PATH: "C:\\npm", PATHEXT: ".EXE;.CMD" },
+      platform: "win32",
+      fileExists: (path) => path === shim,
+      spawn: () => child,
+      versionCheck: () => undefined,
+      shutdownTimeoutMs: 10,
+      forceKillGraceMs: 10,
+      runTerminationCommand,
+    });
+
+    const stopped = server.stop();
+    expect(child.stdin.endCalls).toBe(1);
+    expect(child.killCalls).toEqual([]);
+    await vi.advanceTimersByTimeAsync(10);
+    await stopped;
+
+    expect(runTerminationCommand).toHaveBeenCalledTimes(1);
+    expect(runTerminationCommand).toHaveBeenCalledWith("taskkill.exe", [
+      "/PID",
+      "4321",
+      "/T",
+      "/F",
+    ]);
+    expect(child.killCalls).toEqual([]);
+    vi.useRealTimers();
+  });
+
+  it("reports an actionable error when a Windows shim child has no PID", async () => {
+    vi.useFakeTimers();
+    const child = new FakeProcess(false, null);
+    const shim = win32.join("C:\\npm", "codex.CMD");
+    const server = await spawnCodexAppServer({
+      env: { PATH: "C:\\npm", PATHEXT: ".EXE;.CMD" },
+      platform: "win32",
+      fileExists: (path) => path === shim,
+      spawn: () => child,
+      versionCheck: () => undefined,
+      shutdownTimeoutMs: 10,
+      forceKillGraceMs: 10,
+    });
+    const stopped = server.stop().then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(await stopped).toMatchObject({ name: "AppServerLifecycleError" });
+    expect((await stopped as Error).message).toMatch(/Windows.*PID.*taskkill/i);
+    vi.useRealTimers();
+  });
+
+  it("bounds a hung Windows taskkill invocation", async () => {
+    vi.useFakeTimers();
+    const child = new FakeProcess(false, 4321);
+    const shim = win32.join("C:\\npm", "codex.CMD");
+    const runTerminationCommand = vi.fn(
+      () => new Promise<void>(() => undefined),
+    );
+    const server = await spawnCodexAppServer({
+      env: { PATH: "C:\\npm", PATHEXT: ".EXE;.CMD" },
+      platform: "win32",
+      fileExists: (path) => path === shim,
+      spawn: () => child,
+      versionCheck: () => undefined,
+      shutdownTimeoutMs: 10,
+      forceKillGraceMs: 10,
+      runTerminationCommand,
+    });
+    const stopped = server.stop().then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(runTerminationCommand).toHaveBeenCalledTimes(1);
+    expect(await stopped).toMatchObject({
+      name: "AppServerLifecycleError",
+      message: expect.stringMatching(/taskkill.*did not finish/i),
+    });
+    vi.useRealTimers();
+  });
+
   it("swallows a late stdin EPIPE after process close", async () => {
     const child = new FakeProcess();
-    const server = spawnCodexAppServer({
+    const server = await spawnCodexAppServer({
       spawn: () => child,
       versionCheck: () => undefined,
     });
@@ -181,7 +308,7 @@ describe("spawnCodexAppServer", () => {
 
   it("makes shutdown idempotent", async () => {
     const child = new FakeProcess();
-    const server = spawnCodexAppServer({
+    const server = await spawnCodexAppServer({
       spawn: () => child,
       versionCheck: () => undefined,
     });
