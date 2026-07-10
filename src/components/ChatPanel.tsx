@@ -17,6 +17,7 @@ import {
   writeAttachmentToDisk,
 } from "../attachments";
 import * as path from "path";
+import { clearComposerAfterAcceptedSend } from "./composer-send";
 
 interface AttachedFile {
   name: string;
@@ -346,19 +347,21 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
     (item: { name: string; builtin?: boolean }) => {
       setSlashMenuOpen(false);
       if (item.builtin && item.name === "compact") {
-        setInputValues((prev) => ({ ...prev, [activeTabId]: "" }));
-        compact();
+        clearComposerAfterAcceptedSend(compact(), () => {
+          setInputValues((prev) => ({ ...prev, [activeTabId]: "" }));
+        });
         return;
       }
       if (item.builtin && item.name === "context") {
-        setInputValues((prev) => ({ ...prev, [activeTabId]: "" }));
-        sendMessage("/context");
+        clearComposerAfterAcceptedSend(sendMessage("/context"), () => {
+          setInputValues((prev) => ({ ...prev, [activeTabId]: "" }));
+        });
         return;
       }
       setInputValues((prev) => ({ ...prev, [activeTabId]: `/${item.name} ` }));
       inputRef.current?.focus();
     },
-    [activeTabId, compact]
+    [activeTabId, compact, sendMessage]
   );
 
   const handleInput = useCallback(
@@ -384,11 +387,6 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
   const handleSend = useCallback(() => {
     const text = (inputValues[activeTabId] ?? "").trim();
     if (!text && attachedFiles.length === 0) return;
-    setInputValues((prev) => ({ ...prev, [activeTabId]: "" }));
-    if (inputRef.current) {
-      inputRef.current.style.height = "auto";
-    }
-    setSlashMenuOpen(false);
     const meta = attachedFiles.length > 0
       ? { displayText: text, attachedFileNames: attachedFiles.map((f) => f.name) }
       : undefined;
@@ -434,8 +432,7 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
     }
     const messageText = textParts.join("\n\n");
 
-    setAttachedFilesMap((prev) => ({ ...prev, [activeTabId]: [] }));
-
+    let accepted: boolean;
     if (imageFiles.length > 0 || pdfFiles.length > 0) {
       const blocks: any[] = [];
       if (messageText) blocks.push({ type: "text", text: messageText });
@@ -445,10 +442,17 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
       for (const pdf of pdfFiles) {
         blocks.push({ type: "document", source: { type: "base64", media_type: pdf.mediaType, data: pdf.data } });
       }
-      sendMessage(blocks as any, meta);
+      accepted = sendMessage(blocks as any, meta);
     } else {
-      sendMessage(messageText, meta);
+      accepted = sendMessage(messageText, meta);
     }
+    clearComposerAfterAcceptedSend(accepted, () => {
+      setInputValues((prev) => ({ ...prev, [activeTabId]: "" }));
+      setAttachedFilesMap((prev) => ({ ...prev, [activeTabId]: [] }));
+      if (inputRef.current) inputRef.current.style.height = "auto";
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      setSlashMenuOpen(false);
+    });
   }, [inputValues, activeTabId, attachedFiles, sendMessage, attachmentsDir]);
 
   const handleKeyDown = useCallback(

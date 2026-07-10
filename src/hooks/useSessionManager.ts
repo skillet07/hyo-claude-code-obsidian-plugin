@@ -218,13 +218,14 @@ export function useSessionManager(options: SessionManagerOptions) {
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  // The session lifecycle is the single cleanup owner for runtimes created by
-  // this hook. Each runtime unregisters itself from its provider when cleaned.
+  // Detach leases before provider teardown so close callbacks cannot mutate a
+  // successor. The provider is the sole teardown owner for this cleanup path.
   useEffect(() => {
     return () => {
-      lifecycleRef.current.cleanupAll();
+      lifecycleRef.current.detachAll();
+      provider.cleanup();
     };
-  }, []);
+  }, [provider]);
 
   // ------- internal helpers -------
 
@@ -659,7 +660,7 @@ export function useSessionManager(options: SessionManagerOptions) {
     (content: string | any[], meta?: { displayText?: string; attachedFileNames?: string[]; isCompaction?: boolean }) => {
       const tabId = stateRef.current.activeTabId;
       const lifecycle = lifecycleRef.current;
-      if (!lifecycle.beginTurn(tabId)) return;
+      if (!lifecycle.beginTurn(tabId)) return false;
 
       // For display, use the typed text; for arrays (image messages) use displayText or placeholder
       const displayContent = typeof content === "string"
@@ -746,6 +747,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         lifecycle.finishTurn(tabId);
         throw error;
       }
+      return true;
     },
     [options, makeProcessEvent, provider]
   );
@@ -816,7 +818,12 @@ export function useSessionManager(options: SessionManagerOptions) {
 
   const stopGeneration = useCallback(() => {
     const tabId = stateRef.current.activeTabId;
-    lifecycleRef.current.getRuntime(tabId)?.interrupt();
+    const runtime = lifecycleRef.current.getRuntime(tabId);
+    try {
+      runtime?.interrupt();
+    } finally {
+      lifecycleRef.current.cleanupRuntime(tabId);
+    }
     setState((prev) => ({
       ...prev,
       tabs: prev.tabs.map((tab) =>
@@ -938,7 +945,7 @@ export function useSessionManager(options: SessionManagerOptions) {
   }, [options.cwd, options.model, options.permissionMode, options.defaultAgent, provider]);
 
   const compact = useCallback(() => {
-    sendMessage("/compact", { isCompaction: true });
+    return sendMessage("/compact", { isCompaction: true });
   }, [sendMessage]);
 
   // Recover a session that's been poisoned by an orphaned `thinking` block

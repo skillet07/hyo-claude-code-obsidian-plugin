@@ -20,8 +20,10 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
+    "@types/react-test-renderer": "^19.1.0",
     "esbuild": "^0.25.0",
     "obsidian": "latest",
+    "react-test-renderer": "^19.1.0",
     "typescript": "^5.8.0",
     "vitest": "^4.1.10"
   }
