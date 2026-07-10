@@ -3,8 +3,10 @@ import type { App } from "obsidian";
 import { ToolCall } from "./ToolCall";
 import { AskQuestion } from "./AskQuestion";
 import { PlanReview } from "./PlanReview";
+import { PermissionRequest } from "./PermissionRequest";
 import { MarkdownBlock, stripInlineThinkingTags } from "./MarkdownBlock";
 import type { Message } from "../chat-types";
+import type { ProviderApprovalSelection } from "../providers/types";
 import { HIDDEN_TOOLS } from "../chat-types";
 import { THINKING_BLOCK_ERROR_RE } from "../session-repair";
 
@@ -12,7 +14,7 @@ interface ChatMessageProps {
   app: App;
   message: Message;
   onRecover?: () => void;
-  onPermissionResponse?: (requestId: string, behavior: "allow" | "allow_always" | "deny") => void;
+  onPermissionResponse?: (requestId: string, selection: ProviderApprovalSelection) => void;
   onQuestionAnswer?: (questionId: string, answers: Record<string, string>) => void;
 }
 
@@ -135,7 +137,7 @@ function AssistantMessage({ app, message, onRecover, onPermissionResponse, onQue
   app: App;
   message: Message;
   onRecover?: () => void;
-  onPermissionResponse?: (requestId: string, behavior: "allow" | "allow_always" | "deny") => void;
+  onPermissionResponse?: (requestId: string, selection: ProviderApprovalSelection) => void;
   onQuestionAnswer?: (questionId: string, answers: Record<string, string>) => void;
 }) {
   const blocks = message.orderedBlocks || [];
@@ -169,25 +171,12 @@ function AssistantMessage({ app, message, onRecover, onPermissionResponse, onQue
       .join("\n\n");
   }, [blocks, message.content]);
 
-  if (blocks.length === 0 && message.content) {
-    return (
-      <div className="hyo-message hyo-message-assistant">
-        <div className="hyo-message-content">
-          <MarkdownBlock app={app} content={message.content} />
-        </div>
-        {showRecover && onRecover && <RecoverBanner onRecover={onRecover} />}
-        {!message.streaming && (
-          <div className="hyo-message-actions">
-            <CopyButton getText={getTextContent} />
-          </div>
-        )}
-      </div>
-    );
-  }
-
   return (
     <div className="hyo-message hyo-message-assistant">
       <div className="hyo-message-content">
+        {blocks.length === 0 && message.content && (
+          <MarkdownBlock app={app} content={message.content} />
+        )}
         {blocks.map((block, i) => {
           if (block.type === "thinking") {
             return (
@@ -209,19 +198,20 @@ function AssistantMessage({ app, message, onRecover, onPermissionResponse, onQue
           return null;
         })}
 
-        {message.askQuestion && onQuestionAnswer && (
-          <AskQuestion
-            key={message.askQuestion.id}
-            question={message.askQuestion}
-            onAnswer={onQuestionAnswer}
-          />
-        )}
+        {onPermissionResponse && (message.permissionRequests ?? (message.permissionRequest ? [message.permissionRequest] : []))
+          .filter((request) => !request.resolved)
+          .map((request) => <PermissionRequest key={request.requestId} request={request} onRespond={onPermissionResponse} />)}
+
+        {onQuestionAnswer && (message.askQuestions ?? (message.askQuestion ? [message.askQuestion] : []))
+          .map((question) => <AskQuestion key={question.id} question={question} onAnswer={onQuestionAnswer} />)}
 
         {message.planReview && !message.planReview.resolved && onPermissionResponse && (
           <PlanReview
             app={app}
             review={message.planReview}
-            onRespond={onPermissionResponse}
+            onRespond={(requestId, behavior) => onPermissionResponse(requestId, {
+              decision: behavior === "allow_always" ? "allow_session" : behavior,
+            })}
           />
         )}
         {message.planReview?.resolved && (
@@ -233,7 +223,7 @@ function AssistantMessage({ app, message, onRecover, onPermissionResponse, onQue
         )}
       </div>
       {showRecover && onRecover && <RecoverBanner onRecover={onRecover} />}
-      {!message.streaming && blocks.some((b) => b.type === "text") && (
+      {!message.streaming && (message.content || blocks.some((b) => b.type === "text")) && (
         <div className="hyo-message-actions">
           <CopyButton getText={getTextContent} />
         </div>

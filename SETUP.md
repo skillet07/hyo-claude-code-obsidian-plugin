@@ -54,6 +54,8 @@ Close and reopen Obsidian after the installer finishes.
 
 Press the Windows key, type `PowerShell`, and open PowerShell.
 
+The official Codex installer places `codex.exe` under `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`; Hyo checks that location as well as the npm command path. Fully quit every Obsidian window and restart Obsidian after installing so the desktop process receives the updated environment.
+
 For Codex, paste this exact official installer command:
 
 ```powershell

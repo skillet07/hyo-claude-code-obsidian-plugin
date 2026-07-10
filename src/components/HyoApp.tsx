@@ -27,6 +27,7 @@ function resolveProviderCli(
     platform: process.platform,
     home: os.homedir(),
     appData: process.env.APPDATA || "",
+    localAppData: process.env.LOCALAPPDATA || "",
     exists: fs.existsSync,
     findOnPath: (binary) => {
       try {
@@ -150,7 +151,7 @@ export function HyoApp({ app, plugin }: HyoAppProps) {
 2. If not found, install it by running: ${installCommand}
 3. After install, verify it works by running: ${isWindows ? `where ${activeProviderId}` : `which ${activeProviderId}`}
 4. Then run: ${activeProviderId}
-   My browser will open to log in — that's expected. Once I've logged in, tell me to come back to Obsidian and reopen the Hyo panel.
+   My browser will open to log in — that's expected. Once I've logged in, tell me to fully quit and restart Obsidian.
 
 Be friendly and walk me through each step. I might not be technical.`;
 
@@ -204,7 +205,7 @@ Be friendly and walk me through each step. I might not be technical.`;
               Copy install prompt
             </button>
             <p className="hyo-step-note">
-              Once Claude Code is installed, close and reopen this panel.
+              Once Claude Code is installed, fully quit and restart Obsidian.
             </p>
           </div>}
 
@@ -264,9 +265,9 @@ Be friendly and walk me through each step. I might not be technical.`;
             </div>
 
             <div className="hyo-onboarding-step">
-              <strong>Step 4: Reload Hyo</strong>
+              <strong>Step 4: Restart Obsidian</strong>
               <p className="hyo-step-instruction">
-                Close and reopen this panel using the Hyo icon in the sidebar.
+                Fully quit every Obsidian window, restart Obsidian, then open Hyo.
               </p>
             </div>
           </div>

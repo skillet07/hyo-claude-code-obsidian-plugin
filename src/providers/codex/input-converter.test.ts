@@ -54,4 +54,16 @@ describe("convertProviderInput", () => {
       source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" },
     }])).toThrow(/save the PDF to disk/i);
   });
+
+  it("converts a validated structured skill block", () => {
+    expect(convertProviderInput([
+      { type: "skill", name: "review", path: "/skills/review/SKILL.md" },
+      { type: "text", text: "focus on security" },
+    ])).toEqual([
+      { type: "skill", name: "review", path: "/skills/review/SKILL.md" },
+      { type: "text", text: "focus on security", text_elements: [] },
+    ]);
+    expect(() => convertProviderInput([{ type: "skill", name: "review", path: "" }]))
+      .toThrow(/malformed skill/i);
+  });
 });

@@ -35,6 +35,8 @@ export interface CodexNotificationRouterOptions {
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number) => unknown;
   clearTimer?: (timer: unknown) => void;
+  onUnknownNotification?: (method: string) => void;
+  maxUnknownDiagnostics?: number;
 }
 
 export class CodexNotificationRouter {
@@ -43,22 +45,38 @@ export class CodexNotificationRouter {
   private readonly bufferedByItem = new Map<string, BufferedEvents[]>();
   private readonly retiredTurns = new Map<string, number>();
   private readonly tombstoneTimers = new Map<string, unknown>();
-  private readonly options: Required<CodexNotificationRouterOptions>;
+  private readonly options: Required<Omit<CodexNotificationRouterOptions, "onUnknownNotification" | "maxUnknownDiagnostics">>;
+  private readonly unknownMethods = new Set<string>();
+  private readonly onUnknownNotification?: (method: string) => void;
+  private readonly maxUnknownDiagnostics: number;
+  private readonly normalizer: CodexEventNormalizer;
   private bufferedTotal = 0;
   private expiryTimer: unknown;
   private sequence = 0;
 
   constructor(
-    private readonly normalizer = new CodexEventNormalizer(),
+    normalizer: CodexEventNormalizer | undefined = undefined,
     options: CodexNotificationRouterOptions = {},
   ) {
+    const { onUnknownNotification, maxUnknownDiagnostics = 20, ...routingOptions } = options;
+    this.onUnknownNotification = onUnknownNotification;
+    this.maxUnknownDiagnostics = maxUnknownDiagnostics;
+    this.normalizer = normalizer ?? new CodexEventNormalizer({
+      onUnknownNotification: ({ method }) => this.reportUnknown(method),
+    });
     this.options = {
       ...CODEX_ROUTER_DEFAULTS,
       now: () => Date.now(),
       setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
       clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
-      ...options,
+      ...routingOptions,
     };
+  }
+
+  private reportUnknown(method: string): void {
+    if (this.unknownMethods.has(method) || this.unknownMethods.size >= this.maxUnknownDiagnostics) return;
+    this.unknownMethods.add(method);
+    try { this.onUnknownNotification?.(method); } catch { /* diagnostics are non-fatal */ }
   }
 
   registerRuntime(registration: CodexRuntimeRegistration): void {

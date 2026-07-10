@@ -274,6 +274,11 @@ export type ProviderEvent =
   | { type: "closed"; exitCode: number | null };
 
 export type ProviderApprovalBehavior = "allow" | "allow_always" | "deny";
+export type ProviderApprovalSelection =
+  | { decision: "allow" | "allow_session" | "deny" | "cancel" }
+  | { decision: "allow_execpolicy_amendment"; execpolicyAmendment: string[] }
+  | { decision: "apply_network_policy_amendment"; networkPolicyAmendment: { host: string; action: string } }
+  | { decision: "permissions"; permissions: Record<string, unknown>; scope: "turn" | "session" };
 
 export type ProviderApprovalPolicy =
   | "untrusted"
@@ -321,6 +326,7 @@ export interface ProviderRuntime {
     behavior: ProviderApprovalBehavior,
     toolName?: string,
     updatedInput?: Record<string, unknown>,
+    selection?: ProviderApprovalSelection,
   ): void;
   respondQuestion(
     requestId: string,

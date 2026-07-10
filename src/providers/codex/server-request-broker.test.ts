@@ -271,7 +271,7 @@ describe("CodexServerRequestBroker", () => {
         threadId: "thread-1", turnId: "turn-1", itemId: "permissions-1",
         reason: "Need shared files",
         input: { cwd: "/vault", environmentId: "env-1", permissions },
-        availableDecisions: ["allow"],
+        availableDecisions: ["allow", "allow_session", "deny"],
         grantScopes: ["turn", "session"],
       });
       expect(broker.respondPermissions(uiRequestId(`permissions-${scope}`), {

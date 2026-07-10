@@ -12,6 +12,7 @@ import type {
   ProviderEvent,
   ProviderHistoryMessage,
   ProviderId,
+  ProviderApprovalSelection,
   ProviderRecoveryResult,
   ProviderRuntime,
   ProviderSessionSummary,
@@ -19,7 +20,10 @@ import type {
 } from "../providers/types";
 import {
   applyAgentMessageCompletion,
+  applyPlanDelta,
+  applyPlanUpdate,
   applyProviderTextDelta,
+  applyReasoningCompletion,
 } from "../providers/event-reducer";
 import {
   SessionLifecycle,
@@ -567,24 +571,42 @@ export function useSessionManager(options: SessionManagerOptions) {
             "allow",
           );
         } else {
-          updateTabLastAssistant(tabId, () => ({
+          updateTabLastAssistant(tabId, (message) => ({
             permissionRequest: {
               requestId: event.requestId,
               toolName: event.toolName,
               input: event.input,
+              approvalKind: event.approvalKind,
+              reason: event.reason,
+              availableDecisions: event.availableDecisions,
+              proposedAmendments: event.proposedAmendments,
+              grantScopes: event.grantScopes,
             },
+            permissionRequests: [
+              ...(message.permissionRequests ?? (message.permissionRequest ? [message.permissionRequest] : [])),
+              {
+                requestId: event.requestId, toolName: event.toolName, input: event.input,
+                approvalKind: event.approvalKind, reason: event.reason,
+                availableDecisions: event.availableDecisions,
+                proposedAmendments: event.proposedAmendments, grantScopes: event.grantScopes,
+              },
+            ],
           }));
         }
         return;
       }
 
       if (event.type === "question_requested") {
-        updateTabLastAssistant(tabId, () => ({
+        updateTabLastAssistant(tabId, (message) => ({
           askQuestion: {
             id: event.requestId,
             questions: event.questions,
             answers: {},
           },
+          askQuestions: [
+            ...(message.askQuestions ?? (message.askQuestion ? [message.askQuestion] : [])),
+            { id: event.requestId, questions: event.questions, answers: {} },
+          ],
         }));
         return;
       }
@@ -621,6 +643,10 @@ export function useSessionManager(options: SessionManagerOptions) {
               },
             }
             : {}),
+          permissionRequests: (message.permissionRequests ?? []).map((request) =>
+            request.requestId === event.requestId ? { ...request, resolved: "denied" as const } : request,
+          ),
+          askQuestions: (message.askQuestions ?? []).filter((question) => question.id !== event.requestId),
         }));
         return;
       }
@@ -847,7 +873,7 @@ export function useSessionManager(options: SessionManagerOptions) {
       if (event.type === "thinking_delta") {
         const existing = ss.orderedBlocks.find(
           (block) =>
-            block.type === "thinking" && block.turnIndex === ss.turnIndex,
+            block.type === "thinking" && (event.itemId ? block.providerItemId === event.itemId : block.turnIndex === ss.turnIndex),
         );
         if (existing) existing.content = (existing.content || "") + event.delta;
         else {
@@ -855,8 +881,46 @@ export function useSessionManager(options: SessionManagerOptions) {
             type: "thinking",
             content: event.delta,
             turnIndex: ss.turnIndex,
+            ...(event.itemId ? { providerItemId: event.itemId } : {}),
           });
         }
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "reasoning_completed") {
+        applyReasoningCompletion(ss.orderedBlocks, ss.turnIndex, event.itemId, event.summary, event.content);
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "plan_delta") {
+        applyPlanDelta(ss.orderedBlocks, ss.turnIndex, event.itemId, event.delta);
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "plan_updated") {
+        applyPlanUpdate(ss.orderedBlocks, ss.turnIndex, event);
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "review_mode_changed") {
+        const content = event.active
+          ? `### Review mode\n\nStarted review: ${event.review || "Review"}`
+          : `### Review mode\n\nReview completed${event.review ? `: ${event.review}` : ""}`;
+        const id = `review:${event.itemId}`;
+        const existing = ss.orderedBlocks.find((block) => block.providerItemId === id);
+        if (existing) existing.content = content;
+        else ss.orderedBlocks.push({ type: "text", content, turnIndex: ss.turnIndex, providerItemId: id });
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "warning") {
+        const content = `> [!warning] Codex warning\n> ${event.message.replace(/\n/g, "\n> ")}`;
+        ss.orderedBlocks.push({ type: "text", content, turnIndex: ss.turnIndex });
         updateTabLastAssistant(tabId, () => buildSnapshot(ss));
         return;
       }
@@ -1101,24 +1165,39 @@ export function useSessionManager(options: SessionManagerOptions) {
   );
 
   const sendPermissionResponse = useCallback(
-    (requestId: string, behavior: "allow" | "allow_always" | "deny") => {
+    (requestId: string, requested: ProviderApprovalSelection | "allow" | "allow_always" | "deny") => {
+      const hasStructuredSelection = typeof requested !== "string";
+      const selection: ProviderApprovalSelection = typeof requested === "string"
+        ? { decision: requested === "allow_always" ? "allow_session" : requested }
+        : requested;
       const tabId = stateRef.current.activeTabId;
       // Look up the toolName from the pending permission request so the
       // transport can build the correct updatedPermissions for "always allow".
       const tab = stateRef.current.tabs.find((t) => t.id === tabId);
-      const lastMsg = tab?.messages[tab.messages.length - 1];
-      const permissionMatches =
-        lastMsg?.permissionRequest?.requestId === requestId &&
-        !lastMsg.permissionRequest.resolved;
+      const lastMsg = [...(tab?.messages ?? [])].reverse().find((message) =>
+        message.role === "assistant" && (
+          message.permissionRequest?.requestId === requestId ||
+          message.permissionRequests?.some((request) => request.requestId === requestId) ||
+          message.planReview?.requestId === requestId
+        ),
+      );
+      const matchedRequest = lastMsg?.permissionRequests?.find((request) => request.requestId === requestId)
+        ?? (lastMsg?.permissionRequest?.requestId === requestId ? lastMsg.permissionRequest : undefined);
+      const permissionMatches = !!matchedRequest && !matchedRequest.resolved;
       const planMatches =
         lastMsg?.planReview?.requestId === requestId &&
         !lastMsg.planReview.resolved;
       if (!permissionMatches && !planMatches) return;
-      const toolName = lastMsg?.permissionRequest?.toolName;
+      const toolName = matchedRequest?.toolName;
+      const behavior = selection.decision === "allow_session" || (selection.decision === "permissions" && selection.scope === "session")
+        ? "allow_always" : selection.decision === "deny" || selection.decision === "cancel" || (selection.decision === "permissions" && Object.keys(selection.permissions).length === 0)
+          ? "deny" : "allow";
       lifecycleRef.current.getRuntime(tabId)?.respondApproval(
         requestId,
         behavior,
         toolName,
+        undefined,
+        hasStructuredSelection ? selection : undefined,
       );
       updateTabLastAssistant(tabId, (msg) => {
         const updates: Partial<Message> = {};
@@ -1127,6 +1206,11 @@ export function useSessionManager(options: SessionManagerOptions) {
             ...msg.permissionRequest,
             resolved: behavior === "deny" ? ("denied" as const) : ("allowed" as const),
           };
+        }
+        if (msg.permissionRequests?.some((request) => request.requestId === requestId)) {
+          updates.permissionRequests = msg.permissionRequests.map((request) => request.requestId === requestId
+            ? { ...request, resolved: behavior === "deny" ? "denied" as const : "allowed" as const }
+            : request);
         }
         // Also resolve planReview if this requestId matches
         if (msg.planReview && msg.planReview.requestId === requestId) {
@@ -1152,9 +1236,11 @@ export function useSessionManager(options: SessionManagerOptions) {
       const tab = stateRef.current.tabs.find((t) => t.id === tabId);
       const lastAssistant = [...(tab?.messages || [])]
         .reverse()
-        .find((m) => m.role === "assistant");
-      if (lastAssistant?.askQuestion?.id !== questionId) return;
-      const questions = lastAssistant?.askQuestion?.questions || [];
+        .find((m) => m.role === "assistant" && (m.askQuestion?.id === questionId || m.askQuestions?.some((q) => q.id === questionId)));
+      const matchedQuestion = lastAssistant?.askQuestions?.find((q) => q.id === questionId)
+        ?? (lastAssistant?.askQuestion?.id === questionId ? lastAssistant.askQuestion : undefined);
+      if (!matchedQuestion) return;
+      const questions = matchedQuestion.questions;
 
       // Send control_response with questions + answers as updatedInput.
       // The CLI was blocked on the control_request — this unblocks it.
@@ -1167,7 +1253,10 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       // Clear the question UI. The assistant message stays streaming —
       // Claude will continue and the result event will finalize it.
-      updateTabLastAssistant(tabId, () => ({ askQuestion: null }));
+      updateTabLastAssistant(tabId, (message) => ({
+        ...(message.askQuestion?.id === questionId ? { askQuestion: null } : {}),
+        askQuestions: (message.askQuestions ?? []).filter((question) => question.id !== questionId),
+      }));
     },
     [updateTabLastAssistant]
   );

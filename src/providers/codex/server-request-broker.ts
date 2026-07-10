@@ -255,7 +255,7 @@ export class CodexServerRequestBroker {
         environmentId: params.environmentId,
         permissions: params.permissions,
       },
-      availableDecisions: ["allow"],
+      availableDecisions: ["allow", "allow_session", "deny"],
       grantScopes: ["turn", "session"],
     });
   }

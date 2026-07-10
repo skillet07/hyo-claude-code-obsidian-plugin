@@ -112,6 +112,7 @@ class ClaudeRuntime implements ProviderRuntime {
     behavior: "allow" | "allow_always" | "deny",
     toolName?: string,
     updatedInput?: Record<string, unknown>,
+    _selection?: Parameters<ProviderRuntime["respondApproval"]>[4],
   ): void {
     this.transport.sendPermissionResponse(
       requestId,

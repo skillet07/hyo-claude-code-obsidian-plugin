@@ -206,4 +206,17 @@ describe("CodexNotificationRouter", () => {
     expect(router.getBufferedCount("thread-a", "turn-a")).toBe(0);
     expect(events).not.toHaveBeenCalled();
   });
+
+  it("reports unknown notification methods once each up to a bounded cap", () => {
+    const diagnostic = vi.fn();
+    const router = new CodexNotificationRouter(undefined, {
+      onUnknownNotification: diagnostic,
+      maxUnknownDiagnostics: 2,
+    });
+    router.route({ method: "future/one", params: {} } as any);
+    router.route({ method: "future/one", params: {} } as any);
+    router.route({ method: "future/two", params: {} } as any);
+    router.route({ method: "future/three", params: {} } as any);
+    expect(diagnostic.mock.calls).toEqual([["future/one"], ["future/two"]]);
+  });
 });

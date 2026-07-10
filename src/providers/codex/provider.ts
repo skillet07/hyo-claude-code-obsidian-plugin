@@ -1,6 +1,7 @@
 import type {
   ChatProvider,
   ProviderApprovalBehavior,
+  ProviderApprovalSelection,
   ProviderAuthState,
   ProviderCapabilities,
   ProviderEvent,
@@ -662,6 +663,7 @@ export class CodexProvider implements ChatProvider {
     runtime: CodexRuntime,
     requestId: string,
     behavior: ProviderApprovalBehavior,
+    selection?: ProviderApprovalSelection,
   ): boolean {
     const connection = this.active;
     const owner = connection?.requestOwners.get(requestId);
@@ -669,6 +671,14 @@ export class CodexProvider implements ChatProvider {
       return false;
     }
     if (owner.approvalKind === "permissions") {
+      if (selection?.decision === "permissions") {
+        const accepted = connection.broker.respondPermissions(requestId, {
+          permissions: selection.permissions,
+          scope: selection.scope,
+        });
+        if (accepted) connection.requestOwners.delete(requestId);
+        return accepted;
+      }
       if (behavior === "deny") {
         const denied = connection.broker.respondPermissions(requestId, {
           permissions: {},
@@ -687,13 +697,15 @@ export class CodexProvider implements ChatProvider {
       if (accepted) connection.requestOwners.delete(requestId);
       return accepted;
     }
-    const response: ProviderApprovalResponse = {
+    const response: ProviderApprovalResponse = selection && selection.decision !== "permissions"
+      ? selection as ProviderApprovalResponse
+      : {
       decision: behavior === "allow_always"
         ? "allow_session"
         : behavior === "allow"
           ? "allow"
           : "deny",
-    };
+      };
     const accepted = connection.broker.respondApproval(requestId, response);
     if (accepted) connection.requestOwners.delete(requestId);
     return accepted;
@@ -729,7 +741,10 @@ export class CodexProvider implements ChatProvider {
 
   private async createConnection(): Promise<ActiveConnection> {
     const generation = ++this.generation;
-    const router = new CodexNotificationRouter();
+    const router = new CodexNotificationRouter(undefined, {
+      onUnknownNotification: (method) => console.warn(`[hyo][codex] Unknown app-server notification: ${method}`),
+      maxUnknownDiagnostics: 20,
+    });
     const requestOwners = new Map<string, PendingRequestOwner>();
     let connection: ActiveConnection | undefined;
     let requestRouter!: CodexBrokerRequestRouter;
@@ -928,8 +943,9 @@ export class CodexRuntime implements ProviderRuntime {
     behavior: ProviderApprovalBehavior,
     _toolName?: string,
     _updatedInput?: Record<string, unknown>,
+    selection?: ProviderApprovalSelection,
   ): void {
-    this.provider.respondApproval(this, requestId, behavior);
+    this.provider.respondApproval(this, requestId, behavior, selection);
   }
 
   respondQuestion(

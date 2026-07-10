@@ -59,6 +59,7 @@ export function providerCliCandidates(
   platform: NodeJS.Platform,
   home: string,
   appData: string,
+  localAppData = "",
 ): string[] {
   const binary = providerId === "codex" ? "codex" : "claude";
   const custom = configuredPath && isPathLike(configuredPath)
@@ -66,7 +67,13 @@ export function providerCliCandidates(
     : [];
   if (platform === "win32") {
     const npmRoot = appData || win32.join(home, "AppData", "Roaming");
-    return [...custom, win32.join(npmRoot, "npm", `${binary}.cmd`)];
+    return [
+      ...custom,
+      ...(providerId === "codex" && localAppData
+        ? [win32.join(localAppData, "Programs", "OpenAI", "Codex", "bin", "codex.exe")]
+        : []),
+      win32.join(npmRoot, "npm", `${binary}.cmd`),
+    ];
   }
   return [
     ...custom,
@@ -84,6 +91,7 @@ export interface DetectProviderCliOptions {
   platform: NodeJS.Platform;
   home: string;
   appData: string;
+  localAppData?: string;
   exists(path: string): boolean;
   findOnPath(binary: string): string;
 }
@@ -97,6 +105,7 @@ export function detectProviderCli(options: DetectProviderCliOptions): string {
     options.platform,
     options.home,
     options.appData,
+    options.localAppData,
   );
   const configuredIsStandard = configured === binary ||
     configured === `/usr/local/bin/${binary}` ||

@@ -30,8 +30,10 @@ describe("provider onboarding", () => {
       .toContain("/opt/homebrew/bin/codex");
     expect(providerCliCandidates("codex", "codex", "linux", "/home/me", ""))
       .toContain("/home/me/.local/bin/codex");
-    expect(providerCliCandidates("codex", "codex", "win32", "C:\\Users\\me", "C:\\Users\\me\\AppData\\Roaming"))
+    expect(providerCliCandidates("codex", "codex", "win32", "C:\\Users\\me", "C:\\Users\\me\\AppData\\Roaming", "C:\\Users\\me\\AppData\\Local"))
       .toContain("C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd");
+    expect(providerCliCandidates("codex", "codex", "win32", "C:\\Users\\me", "C:\\Users\\me\\AppData\\Roaming", "C:\\Users\\me\\AppData\\Local"))
+      .toContain("C:\\Users\\me\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe");
   });
 
   it("prefers an existing custom path and falls back to PATH lookup", () => {

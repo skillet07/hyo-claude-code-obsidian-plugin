@@ -99,6 +99,7 @@ export async function spawnCodexAppServer(
       sourceEnv.HOME,
       platform,
       sourceEnv.APPDATA,
+      sourceEnv.LOCALAPPDATA,
     ),
   };
   await (

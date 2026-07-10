@@ -92,10 +92,11 @@ Implemented Codex surfaces include:
 
 - streaming assistant text, reasoning summaries/content, plans, warnings, errors, token usage, and compaction boundaries;
 - command execution, file changes, MCP and dynamic tools, web search, image view/generation, sleep, and collaboration/subagent tool cards;
-- inline command, file-change, and permission approvals, including allow, allow for the session where supported, and deny;
+- inline command, file-change, and permission approvals, including provider-advertised session grants, cancel/deny, command-policy amendments, and each proposed network-policy amendment;
 - structured user questions with safe cancellation when a request or runtime retires;
 - thread listing, provider-scoped history loading and renaming, and stable turn resume;
 - explicit compact, live model catalog and reasoning effort, enabled skills, account rate limits, and ChatGPT account state;
+- provider-safe attachments: Claude receives native inline PDFs, while Codex receives a byte-identical local PDF path it can inspect with file tools;
 - Codex subagent spawn/send/wait/close activity from the current stable `collabToolCall` shape, including singular receiver/new-thread IDs and agent status, while retaining compatibility with the Codex CLI 0.144.1 `collabAgentToolCall` shape.
 
 ## Security defaults

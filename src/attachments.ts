@@ -36,6 +36,18 @@ export function writeAttachmentToDisk(
   return filePath;
 }
 
+export function writeBinaryAttachmentToDisk(
+  attachmentsDir: string,
+  filename: string,
+  content: Uint8Array,
+): string {
+  fs.mkdirSync(attachmentsDir, { recursive: true });
+  const safeName = filename.replace(/[^a-zA-Z0-9.\-_]/g, "_");
+  const filePath = path.join(attachmentsDir, `${Date.now()}-${safeName}`);
+  fs.writeFileSync(filePath, content);
+  return filePath;
+}
+
 // Delete attachment files older than maxAgeDays. Safe because active sessions
 // touch files far more recently than this; only stale files get removed.
 export function cleanupOldAttachments(attachmentsDir: string, maxAgeDays = 1): void {

@@ -240,6 +240,7 @@ export class HyoSettingTab extends PluginSettingTab {
           platform: process.platform,
           home: os.homedir(),
           appData: process.env.APPDATA || "",
+          localAppData: process.env.LOCALAPPDATA || "",
           exists: fs.existsSync,
           findOnPath: (binary) => {
             try {

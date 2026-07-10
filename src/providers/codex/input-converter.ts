@@ -33,6 +33,13 @@ function convertBlock(value: unknown): UserInput {
     return { type: "localImage", path: value.path };
   }
 
+  if (value.type === "skill") {
+    if (typeof value.name === "string" && value.name.trim() && typeof value.path === "string" && value.path.trim()) {
+      return { type: "skill", name: value.name, path: value.path };
+    }
+    throw new UnsupportedCodexInputError("Codex received a malformed skill block. A non-empty name and path are required.");
+  }
+
   if (value.type === "image") {
     if (typeof value.url === "string") {
       if (!value.url.startsWith("data:image/")) {

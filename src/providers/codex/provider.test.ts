@@ -711,6 +711,30 @@ describe("CodexProvider runtime lifecycle", () => {
     });
   });
 
+  it("carries a structured network amendment through runtime to the exact wire response", async () => {
+    const { provider, handlers } = createHarness();
+    const runtime = provider.createRuntime(runtimeOptions(() => undefined));
+    runtime.start();
+    runtime.send("one");
+    await vi.waitFor(() => expect(runtime.ready).toBe(true));
+    const pending = handlers[0]!.onServerRequest({
+      id: "network-amendment", method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "command-1", command: "curl example.com", cwd: "/vault",
+        reason: "Network", environmentId: "env", approvalId: null, commandActions: null,
+        networkApprovalContext: { host: "example.com" }, proposedExecpolicyAmendment: null,
+        proposedNetworkPolicyAmendments: [{ host: "example.com", action: "allow" }],
+      },
+    });
+    runtime.respondApproval("string:network-amendment", "allow", undefined, undefined, {
+      decision: "apply_network_policy_amendment",
+      networkPolicyAmendment: { host: "example.com", action: "allow" },
+    });
+    await expect(pending).resolves.toEqual({
+      decision: { applyNetworkPolicyAmendment: { network_policy_amendment: { host: "example.com", action: "allow" } } },
+    });
+  });
+
   it("settles deny for every approval request kind", async () => {
     const { provider, handlers } = createHarness();
     const runtime = provider.createRuntime(runtimeOptions(() => undefined));

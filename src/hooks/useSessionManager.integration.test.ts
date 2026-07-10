@@ -10,6 +10,7 @@ import type {
   ProviderRuntimeOptions,
   ProviderSessionOptions,
   ProviderSessionSummary,
+  ProviderApprovalSelection,
 } from "../providers/types";
 
 const providerMocks = vi.hoisted(() => ({
@@ -42,7 +43,7 @@ class FakeRuntime implements ProviderRuntime {
   interruptCalls = 0;
   compactCalls = 0;
   sent: (string | any[])[] = [];
-  approvals: Array<{ requestId: string; behavior: string }> = [];
+  approvals: Array<{ requestId: string; behavior: string; selection?: ProviderApprovalSelection }> = [];
   questionResponses: Array<{ requestId: string; answers: Record<string, string> }> = [];
 
   constructor(
@@ -66,8 +67,8 @@ class FakeRuntime implements ProviderRuntime {
     this.interruptCalls++;
   }
 
-  respondApproval(requestId: string, behavior: "allow" | "allow_always" | "deny"): void {
-    this.approvals.push({ requestId, behavior });
+  respondApproval(requestId: string, behavior: "allow" | "allow_always" | "deny", _tool?: string, _input?: Record<string, unknown>, selection?: ProviderApprovalSelection): void {
+    this.approvals.push({ requestId, behavior, ...(selection ? { selection } : {}) });
   }
 
   respondQuestion(
@@ -435,6 +436,54 @@ describe("useSessionManager lifecycle integration", () => {
       reason: "server",
     }));
     expect(manager.activeMessages.at(-1)?.planReview?.resolved).toBe("rejected");
+  });
+
+  it("keeps parallel approvals and questions independently pending by request id", async () => {
+    const provider = new FakeProvider("codex");
+    await mount("parallel", { providers: [provider], defaultProviderId: "codex" });
+    act(() => manager.sendMessage("hello"));
+    const runtime = provider.runtimes[0]!;
+    act(() => {
+      runtime.emit({ type: "approval_requested", requestId: "a1", toolName: "command", approvalKind: "command_execution", availableDecisions: ["allow", "deny"] });
+      runtime.emit({ type: "approval_requested", requestId: "a2", toolName: "file change", approvalKind: "file_change", availableDecisions: ["allow", "deny"] });
+      runtime.emit({ type: "question_requested", requestId: "q1", questions: [{ id: "one", question: "One?" }] });
+      runtime.emit({ type: "question_requested", requestId: "q2", questions: [{ id: "two", question: "Two?" }] });
+    });
+    expect(manager.activeMessages.at(-1)?.permissionRequests?.map((r) => r.requestId)).toEqual(["a1", "a2"]);
+    expect(manager.activeMessages.at(-1)?.askQuestions?.map((q) => q.id)).toEqual(["q1", "q2"]);
+
+    act(() => manager.sendPermissionResponse("a2", { decision: "deny" }));
+    act(() => manager.sendQuestionAnswer("q2", { two: "second" }));
+    expect(manager.activeMessages.at(-1)?.permissionRequests?.find((r) => r.requestId === "a1")?.resolved).toBeUndefined();
+    expect(manager.activeMessages.at(-1)?.permissionRequests?.find((r) => r.requestId === "a2")?.resolved).toBe("denied");
+    expect(manager.activeMessages.at(-1)?.askQuestions?.map((q) => q.id)).toEqual(["q1"]);
+    expect(runtime.approvals.at(-1)).toEqual({ requestId: "a2", behavior: "deny", selection: { decision: "deny" } });
+
+    act(() => runtime.emit({ type: "request_resolved", requestId: "a1", reason: "server" }));
+    expect(manager.activeMessages.at(-1)?.permissionRequests?.find((r) => r.requestId === "a1")?.resolved).toBe("denied");
+    act(() => manager.sendQuestionAnswer("q1", { one: "first" }));
+    expect(runtime.questionResponses.map((r) => r.requestId)).toEqual(["q2", "q1"]);
+  });
+
+  it("consumes plans, final reasoning, review transitions, and warnings", async () => {
+    const provider = new FakeProvider("codex");
+    await mount("events", { providers: [provider], defaultProviderId: "codex" });
+    act(() => manager.sendMessage("hello"));
+    const runtime = provider.runtimes[0]!;
+    act(() => {
+      runtime.emit({ type: "plan_delta", itemId: "p1", delta: "Draft" });
+      runtime.emit({ type: "plan_updated", itemId: "p1", text: "Final", final: true });
+      runtime.emit({ type: "thinking_delta", itemId: "r1", delta: "partial" });
+      runtime.emit({ type: "reasoning_completed", itemId: "r1", summary: ["Summary wins"], content: ["raw"] });
+      runtime.emit({ type: "review_mode_changed", itemId: "review1", active: true, review: "security" });
+      runtime.emit({ type: "warning", message: "Scoped warning" });
+    });
+    const blocks = manager.activeMessages.at(-1)?.orderedBlocks ?? [];
+    expect(blocks.filter((b) => b.providerItemId === "plan:p1")).toHaveLength(1);
+    expect(blocks.find((b) => b.providerItemId === "plan:p1")?.content).toContain("Final");
+    expect(blocks.find((b) => b.providerItemId === "r1")?.content).toBe("Summary wins");
+    expect(blocks.some((b) => b.content?.includes("Started review: security"))).toBe(true);
+    expect(blocks.some((b) => b.content?.includes("Scoped warning"))).toBe(true);
   });
 
   it("awaits asynchronous session listing and history loading", async () => {

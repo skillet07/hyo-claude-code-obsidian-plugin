@@ -112,6 +112,18 @@ describe("spawnCodexAppServer", () => {
     );
   });
 
+  it("adds the official native Windows Codex directory to the spawn PATH", async () => {
+    const child = new FakeProcess();
+    const spawn = vi.fn<AppServerSpawn>(() => child);
+    await spawnCodexAppServer({
+      env: { PATH: "C:\\npm", LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" },
+      platform: "win32", spawn, versionCheck: () => undefined,
+    });
+    expect(spawn.mock.calls[0]![2].env!.PATH).toContain(
+      "C:\\Users\\me\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin",
+    );
+  });
+
   it("captures bounded stderr and reports close details", async () => {
     const child = new FakeProcess();
     const server = await spawnCodexAppServer({

@@ -266,10 +266,12 @@ export function buildElectronSafePath(
   home = process.env.HOME ?? "",
   platform: NodeJS.Platform = process.platform,
   appData = process.env.APPDATA ?? "",
+  localAppData = process.env.LOCALAPPDATA ?? "",
 ): string {
   const pathDelimiter = platform === "win32" ? win32.delimiter : delimiter;
   if (platform === "win32") {
     const candidates = [
+      localAppData ? win32.join(localAppData, "Programs", "OpenAI", "Codex", "bin") : "",
       appData ? win32.join(appData, "npm") : "",
       home ? win32.join(home, "AppData", "Roaming", "npm") : "",
       ...currentPath.split(pathDelimiter),

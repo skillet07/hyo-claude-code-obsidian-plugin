@@ -15,9 +15,10 @@ import {
   formatTokens,
   shouldInline,
   writeAttachmentToDisk,
+  writeBinaryAttachmentToDisk,
 } from "../attachments";
 import * as path from "path";
-import { clearComposerAfterAcceptedSend } from "./composer-send";
+import { clearComposerAfterAcceptedSend, prepareProviderMessage } from "./composer-send";
 
 interface AttachedFile {
   name: string;
@@ -156,6 +157,7 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
         name: skill.name,
         description: skill.description,
         content: "",
+        path: skill.path,
       })));
     }).catch(() => {
       if (active) setCodexSkills([]);
@@ -418,7 +420,11 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
   const handleSend = useCallback(() => {
     const text = (inputValues[activeTabId] ?? "").trim();
     if (!text && attachedFiles.length === 0) return;
-    const meta = attachedFiles.length > 0
+    const slashName = text.match(/^\/([^\s]+)(?:\s|$)/)?.[1];
+    const isCodexSkillInvocation = activeProviderId === "codex" && !!skills.find(
+      (skill) => skill.name === slashName && skill.path,
+    );
+    const meta = attachedFiles.length > 0 || isCodexSkillInvocation
       ? { displayText: text, attachedFileNames: attachedFiles.map((f) => f.name) }
       : undefined;
 
@@ -464,14 +470,26 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
     const messageText = textParts.join("\n\n");
 
     let accepted: boolean;
-    if (imageFiles.length > 0 || pdfFiles.length > 0) {
+    if (imageFiles.length > 0 || pdfFiles.length > 0 || isCodexSkillInvocation) {
       const blocks: any[] = [];
-      if (messageText) blocks.push({ type: "text", text: messageText });
+      let prepared: string | unknown[];
+      try {
+        prepared = prepareProviderMessage({
+          providerId: activeProviderId,
+          text: messageText,
+          pdfs: pdfFiles,
+          skills,
+          writeBinary: (name, bytes) => writeBinaryAttachmentToDisk(attachmentsDir, name, bytes),
+        });
+      } catch (error) {
+        console.error("[hyo] Failed to persist PDF attachment:", error);
+        new Notice(`Could not save PDF attachment. Check write access to ${attachmentsDir} and try again.`);
+        return;
+      }
+      if (Array.isArray(prepared)) blocks.push(...prepared);
+      else if (prepared) blocks.push({ type: "text", text: prepared });
       for (const img of imageFiles) {
         blocks.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
-      }
-      for (const pdf of pdfFiles) {
-        blocks.push({ type: "document", source: { type: "base64", media_type: pdf.mediaType, data: pdf.data } });
       }
       accepted = sendMessage(blocks as any, meta);
     } else {
@@ -484,7 +502,7 @@ export function ChatPanel({ sessionManager, plugin, app }: ChatPanelProps) {
       if (fileInputRef.current) fileInputRef.current.value = "";
       setSlashMenuOpen(false);
     });
-  }, [inputValues, activeTabId, attachedFiles, sendMessage, attachmentsDir]);
+  }, [inputValues, activeTabId, attachedFiles, sendMessage, attachmentsDir, activeProviderId, skills]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {

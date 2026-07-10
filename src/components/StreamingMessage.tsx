@@ -6,12 +6,13 @@ import { AskQuestion } from "./AskQuestion";
 import { PlanReview } from "./PlanReview";
 import { MarkdownBlock } from "./MarkdownBlock";
 import type { Message } from "../chat-types";
+import type { ProviderApprovalSelection } from "../providers/types";
 import { HIDDEN_TOOLS } from "../chat-types";
 
 interface StreamingMessageProps {
   app: App;
   message: Message;
-  onPermissionResponse: (requestId: string, behavior: "allow" | "allow_always" | "deny") => void;
+  onPermissionResponse: (requestId: string, selection: ProviderApprovalSelection) => void;
   onQuestionAnswer: (questionId: string, answers: Record<string, string>) => void;
 }
 
@@ -79,27 +80,30 @@ export function StreamingMessage({
           return null;
         })}
 
-        {message.permissionRequest &&
-          !message.permissionRequest.resolved && (
+        {(message.permissionRequests ?? (message.permissionRequest ? [message.permissionRequest] : []))
+          .filter((request) => !request.resolved).map((request) => (
             <PermissionRequest
-              request={message.permissionRequest}
+              key={request.requestId}
+              request={request}
               onRespond={onPermissionResponse}
             />
-          )}
+          ))}
 
-        {message.askQuestion && (
+        {(message.askQuestions ?? (message.askQuestion ? [message.askQuestion] : [])).map((question) => (
           <AskQuestion
-            key={message.askQuestion.id}
-            question={message.askQuestion}
+            key={question.id}
+            question={question}
             onAnswer={onQuestionAnswer}
           />
-        )}
+        ))}
 
         {message.planReview && !message.planReview.resolved && (
           <PlanReview
             app={app}
             review={message.planReview}
-            onRespond={onPermissionResponse}
+            onRespond={(requestId, behavior) => onPermissionResponse(requestId, {
+              decision: behavior === "allow_always" ? "allow_session" : behavior,
+            })}
           />
         )}
 
@@ -126,8 +130,8 @@ function getActivityLabel(message: Message): string | null {
     askQuestion,
   } = message;
 
-  if (permissionRequest && !permissionRequest.resolved) return null;
-  if (askQuestion) return null;
+  if ((message.permissionRequests ?? (permissionRequest ? [permissionRequest] : [])).some((request) => !request.resolved)) return null;
+  if ((message.askQuestions ?? (askQuestion ? [askQuestion] : [])).length) return null;
 
   const planReview = message.planReview;
   if (planReview && !planReview.resolved) return null;
