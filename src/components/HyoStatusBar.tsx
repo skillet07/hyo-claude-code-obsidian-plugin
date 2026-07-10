@@ -556,8 +556,11 @@ function CodexHyoStatusBar({
 }: HyoStatusBarProps) {
   const [contextOpen, setContextOpen] = useState(false);
   const [popupBottom, setPopupBottom] = useState(0);
+  const [popupLeft, setPopupLeft] = useState(12);
   const statusBarRef = useRef<HTMLDivElement>(null);
-  const contextLimit = Math.max(contextWindow ?? 0, getContextLimit(model));
+  const contextLimit = contextWindow && contextWindow > 0
+    ? contextWindow
+    : getContextLimit(model);
   const contextPct = inputTokens > 0
     ? Math.min(100, (inputTokens / contextLimit) * 100)
     : 0;
@@ -573,6 +576,7 @@ function CodexHyoStatusBar({
     if (statusBarRef.current) {
       const rect = statusBarRef.current.getBoundingClientRect();
       setPopupBottom(globalThis.innerHeight - rect.top + 6);
+      setPopupLeft(Math.max(8, Math.min(rect.left, globalThis.innerWidth - 300 - 8)));
     }
     setContextOpen(true);
   };
@@ -601,6 +605,7 @@ function CodexHyoStatusBar({
           contextLimit={contextLimit}
           open={contextOpen}
           popupBottom={popupBottom}
+          popupLeft={popupLeft}
           onToggle={toggleContext}
           onCompact={() => {
             onCompact();
@@ -655,11 +660,12 @@ interface ContextRingProps {
   contextLimit: number;
   open: boolean;
   popupBottom: number;
+  popupLeft?: number;
   onToggle: () => void;
   onCompact: () => void;
 }
 
-function ContextRing({ pct, barClass, inputTokens, contextLimit, open, popupBottom, onToggle, onCompact }: ContextRingProps) {
+function ContextRing({ pct, barClass, inputTokens, contextLimit, open, popupBottom, popupLeft = 12, onToggle, onCompact }: ContextRingProps) {
   const r = 6;
   const circ = 2 * Math.PI * r;
   const dash = circ * (pct / 100);
@@ -687,7 +693,7 @@ function ContextRing({ pct, barClass, inputTokens, contextLimit, open, popupBott
         </svg>
       </button>
       {open && (
-        <div className="hyo-context-popup" style={{ position: "fixed", bottom: popupBottom, left: 12 }}>
+        <div className="hyo-context-popup" style={{ position: "fixed", bottom: popupBottom, left: popupLeft }}>
           <div className="hyo-usage-popup-title">CONTEXT WINDOW</div>
           <div className="hyo-usage-divider" />
           <div className="hyo-usage-row">

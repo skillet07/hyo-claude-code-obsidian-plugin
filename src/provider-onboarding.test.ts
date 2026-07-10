@@ -99,4 +99,50 @@ describe("provider onboarding", () => {
       findOnPath: vi.fn(() => ""),
     })).toBe("C:\\Custom\\codex.exe");
   });
+
+  it("treats absent legacy standard paths as defaults but keeps custom paths exact", () => {
+    expect(detectProviderCli({
+      providerId: "claude",
+      configuredPath: "/usr/local/bin/claude",
+      platform: "darwin",
+      home: "/Users/me",
+      appData: "",
+      exists: vi.fn((candidate) => candidate === "/Users/me/.local/bin/claude"),
+      findOnPath: vi.fn(() => ""),
+    })).toBe("/Users/me/.local/bin/claude");
+
+    const windowsPath = vi.fn(() => "C:\\Tools\\claude.exe");
+    expect(detectProviderCli({
+      providerId: "claude",
+      configuredPath: "C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd",
+      platform: "win32",
+      home: "C:\\Users\\me",
+      appData: "C:\\Users\\me\\AppData\\Roaming",
+      exists: vi.fn(() => false),
+      findOnPath: windowsPath,
+    })).toBe("C:\\Tools\\claude.exe");
+    expect(windowsPath).toHaveBeenCalledWith("claude");
+
+    expect(detectProviderCli({
+      providerId: "claude",
+      configuredPath: "/usr/local/bin/claude",
+      platform: "win32",
+      home: "C:\\Users\\me",
+      appData: "C:\\Users\\me\\AppData\\Roaming",
+      exists: vi.fn(() => false),
+      findOnPath: windowsPath,
+    })).toBe("C:\\Tools\\claude.exe");
+
+    const customLookup = vi.fn(() => "/usr/bin/claude");
+    expect(detectProviderCli({
+      providerId: "claude",
+      configuredPath: "/custom/missing/claude",
+      platform: "linux",
+      home: "/home/me",
+      appData: "",
+      exists: vi.fn(() => false),
+      findOnPath: customLookup,
+    })).toBe("");
+    expect(customLookup).not.toHaveBeenCalled();
+  });
 });

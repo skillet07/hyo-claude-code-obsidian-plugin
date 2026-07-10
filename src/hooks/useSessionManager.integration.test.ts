@@ -160,6 +160,8 @@ let manager: ReturnType<typeof useSessionManager>;
 
 interface HarnessProps {
   cliPath: string;
+  cwd?: string;
+  maxOutputTokens?: number;
   providers?: ChatProvider[];
   defaultProviderId?: ProviderId;
   providerDefaults?: Partial<Record<ProviderId, Partial<ProviderSessionOptions>>>;
@@ -168,6 +170,8 @@ interface HarnessProps {
 
 function Harness({
   cliPath,
+  cwd = "/tmp/vault",
+  maxOutputTokens,
   providers,
   defaultProviderId,
   providerDefaults,
@@ -175,10 +179,11 @@ function Harness({
 }: HarnessProps) {
   manager = useSessionManager({
     cliPath,
-    cwd: "/tmp/vault",
+    cwd,
     model: "sonnet",
     permissionMode: "default",
     defaultAgent: "",
+    maxOutputTokens,
     providers,
     defaultProviderId,
     providerDefaults,
@@ -220,6 +225,47 @@ afterEach(() => {
 });
 
 describe("useSessionManager lifecycle integration", () => {
+  it("persists positive token-usage context windows for the active Codex tab", async () => {
+    const codex = new FakeProvider("codex");
+    await mount("unused", { providers: [codex], defaultProviderId: "codex" });
+    act(() => manager.sendMessage("context"));
+    act(() => codex.runtimes[0]!.emit({
+      type: "token_usage",
+      inputTokens: 42_000,
+      contextWindow: 256_000,
+    }));
+    expect(manager.activeInputTokens).toBe(42_000);
+    expect(manager.activeContextWindow).toBe(256_000);
+  });
+
+  it("snapshots cwd and max output tokens per tab across runtime recreation", async () => {
+    const provider = new FakeProvider("claude");
+    await mount("unused", {
+      providers: [provider], cwd: "/old/project", maxOutputTokens: 12000,
+    });
+    act(() => manager.sendMessage("old first"));
+    expect(provider.runtimeOptions[0]).toMatchObject({
+      cwd: "/old/project", maxOutputTokens: 12000,
+    });
+
+    await act(async () => {
+      renderer?.update(React.createElement(Harness, {
+        cliPath: "unused", providers: [provider], cwd: "/new/project",
+        maxOutputTokens: 64000,
+      }));
+    });
+    act(() => manager.stopGeneration());
+    act(() => manager.sendMessage("old recreated"));
+    expect(provider.runtimeOptions[1]).toMatchObject({
+      cwd: "/old/project", maxOutputTokens: 12000,
+    });
+
+    act(() => manager.newTab());
+    act(() => manager.sendMessage("new tab"));
+    expect(provider.runtimeOptions[2]).toMatchObject({
+      cwd: "/new/project", maxOutputTokens: 64000,
+    });
+  });
   it("keeps an unspecified Claude error nonterminal and rejects an overlapping send", async () => {
     const provider = new FakeProvider("claude");
     providerMocks.providers.set("provider-a", provider);

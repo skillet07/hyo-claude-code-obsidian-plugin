@@ -40,7 +40,7 @@ export const DEFAULT_SETTINGS: HyoSettings = {
   defaultProvider: "claude",
   providerSettings: {
     claude: {
-      cliPath: "/usr/local/bin/claude",
+      cliPath: "claude",
       model: "claude-sonnet-4-5-20250929",
       permissionMode: "manual",
       defaultAgent: "",
@@ -110,15 +110,13 @@ export function migrateSettings(value: unknown): HyoSettings {
   const providers = record(source.providerSettings);
   const nestedClaude = record(providers.claude);
   const nestedCodex = record(providers.codex);
-  const legacyClaude = Object.keys(nestedClaude).length > 0 ? nestedClaude : source;
-
   const claudeModel = normalizeClaudeModel(stringValue(
-    legacyClaude.model,
-    DEFAULT_SETTINGS.providerSettings.claude.model,
+    nestedClaude.model,
+    stringValue(source.model, DEFAULT_SETTINGS.providerSettings.claude.model),
   ));
   const legacyPermission = stringValue(
-    legacyClaude.permissionMode,
-    DEFAULT_SETTINGS.providerSettings.claude.permissionMode,
+    nestedClaude.permissionMode,
+    stringValue(source.permissionMode, DEFAULT_SETTINGS.providerSettings.claude.permissionMode),
   );
 
   return {
@@ -126,18 +124,18 @@ export function migrateSettings(value: unknown): HyoSettings {
     providerSettings: {
       claude: {
         cliPath: stringValue(
-          legacyClaude.cliPath,
-          DEFAULT_SETTINGS.providerSettings.claude.cliPath,
+          nestedClaude.cliPath,
+          stringValue(source.cliPath, DEFAULT_SETTINGS.providerSettings.claude.cliPath),
         ),
         model: claudeModel,
         permissionMode: legacyPermission === "default" ? "manual" : legacyPermission,
         defaultAgent: stringValue(
-          legacyClaude.defaultAgent,
-          DEFAULT_SETTINGS.providerSettings.claude.defaultAgent,
+          nestedClaude.defaultAgent,
+          stringValue(source.defaultAgent, DEFAULT_SETTINGS.providerSettings.claude.defaultAgent),
         ),
         maxOutputTokens: numberValue(
-          legacyClaude.maxOutputTokens,
-          DEFAULT_SETTINGS.providerSettings.claude.maxOutputTokens,
+          nestedClaude.maxOutputTokens,
+          numberValue(source.maxOutputTokens, DEFAULT_SETTINGS.providerSettings.claude.maxOutputTokens),
         ),
       },
       codex: {

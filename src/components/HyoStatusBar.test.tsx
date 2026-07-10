@@ -26,6 +26,7 @@ import type { ChatProvider } from "../providers/types";
 let renderer: ReactTestRenderer | undefined;
 const originalDocument = (globalThis as any).document;
 const originalInnerHeight = (globalThis as any).innerHeight;
+const originalInnerWidth = (globalThis as any).innerWidth;
 
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -39,6 +40,8 @@ afterEach(() => {
   else (globalThis as any).document = originalDocument;
   if (originalInnerHeight === undefined) delete (globalThis as any).innerHeight;
   else (globalThis as any).innerHeight = originalInnerHeight;
+  if (originalInnerWidth === undefined) delete (globalThis as any).innerWidth;
+  else (globalThis as any).innerWidth = originalInnerWidth;
 });
 
 describe("HyoStatusBar provider boundaries", () => {
@@ -90,6 +93,7 @@ describe("HyoStatusBar provider boundaries", () => {
     const removeEventListener = vi.fn();
     (globalThis as any).document = { addEventListener, removeEventListener };
     (globalThis as any).innerHeight = 900;
+    (globalThis as any).innerWidth = 1000;
     const onCompact = vi.fn();
     const provider = {
       id: "codex",
@@ -112,6 +116,7 @@ describe("HyoStatusBar provider boundaries", () => {
         permissionMode="manual"
         agent=""
         inputTokens={10_000}
+        contextWindow={100_000}
         voiceMode={false}
         hasVoiceApiKey={false}
         onModelChange={vi.fn()}
@@ -127,7 +132,7 @@ describe("HyoStatusBar provider boundaries", () => {
         createNodeMock: (element) =>
           (element as React.ReactElement<{ className?: string }>).props.className === "hyo-status-bar"
           ? {
-              getBoundingClientRect: () => ({ top: 700 }),
+              getBoundingClientRect: () => ({ top: 700, left: 850 }),
               contains: () => false,
             }
           : {},
@@ -140,6 +145,11 @@ describe("HyoStatusBar provider boundaries", () => {
     act(toggle);
     expect(renderer!.root.findByProps({ className: "hyo-context-popup" }).props.style.bottom)
       .toBe(206);
+    expect(renderer!.root.findByProps({ className: "hyo-context-popup" }).props.style.left)
+      .toBe(692);
+    expect(renderer!.root.findAllByProps({ className: "hyo-usage-value" })
+      .map((node) => node.children.join("")))
+      .toContain("10K / 100K");
     expect(addEventListener).toHaveBeenCalledWith("mousedown", expect.any(Function));
 
     act(() => outsideClick?.({ target: {} }));

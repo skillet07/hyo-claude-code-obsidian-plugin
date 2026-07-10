@@ -10,7 +10,7 @@ describe("provider settings", () => {
   it("keeps new installs on Claude while providing safe Codex defaults", () => {
     expect(DEFAULT_SETTINGS.defaultProvider).toBe("claude");
     expect(DEFAULT_SETTINGS.providerSettings.claude).toEqual({
-      cliPath: "/usr/local/bin/claude",
+      cliPath: "claude",
       model: "claude-sonnet-4-5-20250929",
       permissionMode: "manual",
       defaultAgent: "",
@@ -23,6 +23,27 @@ describe("provider settings", () => {
       approvalPolicy: "on-request",
       sandboxMode: "workspace-write",
       networkAccess: false,
+    });
+  });
+
+  it("merges partial nested Claude settings per field over legacy values", () => {
+    const migrated = migrateSettings({
+      cliPath: "/legacy/claude",
+      model: "legacy-model",
+      permissionMode: "acceptEdits",
+      defaultAgent: "legacy-agent",
+      maxOutputTokens: 22000,
+      providerSettings: {
+        claude: { model: "nested-model", defaultAgent: "nested-agent" },
+      },
+    });
+
+    expect(migrated.providerSettings.claude).toEqual({
+      cliPath: "/legacy/claude",
+      model: "nested-model",
+      permissionMode: "acceptEdits",
+      defaultAgent: "nested-agent",
+      maxOutputTokens: 22000,
     });
   });
 

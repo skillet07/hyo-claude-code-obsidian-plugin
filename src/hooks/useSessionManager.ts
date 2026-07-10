@@ -44,6 +44,11 @@ export interface TabSession {
   readonly providerId: ProviderId;
   readonly providerSessionId: string | null;
   readonly providerState: unknown;
+  /** Immutable launch settings captured when this tab is created/opened. */
+  readonly runtimeConfiguration?: {
+    cwd: string;
+    maxOutputTokens?: number;
+  };
   title: string;
   messages: Message[];
   generating: boolean;
@@ -238,6 +243,10 @@ export function useSessionManager(options: SessionManagerOptions) {
           providerId: defaultProviderId,
           providerSessionId: null,
           providerState: null,
+          runtimeConfiguration: {
+            cwd: options.cwd,
+            maxOutputTokens: options.maxOutputTokens,
+          },
           title: "New conversation",
           messages: [],
           generating: false,
@@ -677,7 +686,13 @@ export function useSessionManager(options: SessionManagerOptions) {
         setState((prev) => ({
           ...prev,
           tabs: prev.tabs.map((tab) =>
-            tab.id === tabId ? { ...tab, inputTokens: event.inputTokens } : tab,
+            tab.id === tabId ? {
+              ...tab,
+              inputTokens: event.inputTokens,
+              ...(event.contextWindow && event.contextWindow > 0
+                ? { contextWindow: event.contextWindow }
+                : {}),
+            } : tab,
           ),
         }));
         return;
@@ -868,6 +883,10 @@ export function useSessionManager(options: SessionManagerOptions) {
             providerId: defaultProviderId,
             providerSessionId: null,
             providerState: null,
+            runtimeConfiguration: {
+              cwd: options.cwd,
+              maxOutputTokens: options.maxOutputTokens,
+            },
             title: "New conversation",
             messages: [],
             generating: false,
@@ -881,7 +900,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         activeTabId: id,
       };
     });
-  }, [defaultProviderId, options.defaultAgent, options.model, options.permissionMode, options.providerDefaults]);
+  }, [defaultProviderId, options.cwd, options.defaultAgent, options.maxOutputTokens, options.model, options.permissionMode, options.providerDefaults]);
 
   const closeTab = useCallback((tabIdToClose: string) => {
     lifecycleRef.current.cleanupRuntime(tabIdToClose);
@@ -900,6 +919,10 @@ export function useSessionManager(options: SessionManagerOptions) {
               providerId: defaultProviderId,
               providerSessionId: null,
               providerState: null,
+              runtimeConfiguration: {
+                cwd: options.cwd,
+                maxOutputTokens: options.maxOutputTokens,
+              },
               title: "New conversation",
               messages: [],
               generating: false,
@@ -923,7 +946,7 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       return { tabs: remaining, activeTabId };
     });
-  }, [defaultProviderId, options.defaultAgent, options.model, options.permissionMode, options.providerDefaults]);
+  }, [defaultProviderId, options.cwd, options.defaultAgent, options.maxOutputTokens, options.model, options.permissionMode, options.providerDefaults]);
 
   const switchTab = useCallback((id: string) => {
     setState((prev) => ({ ...prev, activeTabId: id }));
@@ -1038,7 +1061,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         const providerSessionId = currentTab?.providerSessionId;
         let dispatchEvent: (event: ProviderEvent) => void = () => {};
         runtime = provider.createRuntime({
-          cwd: options.cwd,
+          cwd: currentTab?.runtimeConfiguration?.cwd ?? options.cwd,
           model: currentTab?.model ?? providerDefaultsFor(options, owningTab.providerId).model,
           reasoningEffort: currentTab?.reasoningEffort,
           approvalPolicy: currentTab?.approvalPolicy,
@@ -1049,7 +1072,9 @@ export function useSessionManager(options: SessionManagerOptions) {
           providerSessionId: providerSessionId || undefined,
           providerState: currentTab?.providerState,
           resume: !!providerSessionId,
-          maxOutputTokens: options.maxOutputTokens,
+          maxOutputTokens: currentTab?.runtimeConfiguration
+            ? currentTab.runtimeConfiguration.maxOutputTokens
+            : options.maxOutputTokens,
           onEvent: (event) => dispatchEvent(event),
         });
         const lease = lifecycle.attachRuntime(tabId, runtime);
@@ -1413,6 +1438,10 @@ export function useSessionManager(options: SessionManagerOptions) {
             providerId: pastSession.providerId,
             providerSessionId: pastSession.id,
             providerState: pastSession.providerState ?? null,
+            runtimeConfiguration: {
+              cwd: options.cwd,
+              maxOutputTokens: options.maxOutputTokens,
+            },
             title: pastSession.title,
             messages,
             generating: false,
@@ -1426,7 +1455,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         activeTabId: id,
       };
     });
-  }, [defaultProviderId, options.cwd, options.model, options.permissionMode, options.defaultAgent, options.providerDefaults]);
+  }, [defaultProviderId, options.cwd, options.maxOutputTokens, options.model, options.permissionMode, options.defaultAgent, options.providerDefaults]);
 
   const compact = useCallback(() => {
     return sendMessage("/compact", { isCompaction: true });

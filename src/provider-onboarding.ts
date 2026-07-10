@@ -91,18 +91,22 @@ export interface DetectProviderCliOptions {
 export function detectProviderCli(options: DetectProviderCliOptions): string {
   const binary = options.providerId === "codex" ? "codex" : "claude";
   const configured = options.configuredPath.trim();
-  if (configured && configured !== binary) {
+  const standardCandidates = providerCliCandidates(
+    options.providerId,
+    binary,
+    options.platform,
+    options.home,
+    options.appData,
+  );
+  const configuredIsStandard = configured === binary ||
+    configured === `/usr/local/bin/${binary}` ||
+    standardCandidates.includes(configured);
+  if (configured && !configuredIsStandard) {
     return isPathLike(configured)
       ? options.exists(configured) ? configured : ""
       : options.findOnPath(configured).trim();
   }
-  for (const candidate of providerCliCandidates(
-    options.providerId,
-    options.configuredPath,
-    options.platform,
-    options.home,
-    options.appData,
-  )) {
+  for (const candidate of standardCandidates) {
     if (options.exists(candidate)) return candidate;
   }
   return options.findOnPath(binary).trim();

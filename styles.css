@@ -2115,3 +2115,11 @@ button.hyo-ask-send:disabled {
 .hyo-codex-error {
   color: var(--text-error);
 }
+
+.hyo-provider-escape {
+  margin: 12px 0;
+}
+
+.hyo-provider-escape-tab {
+  margin-right: 6px;
+}
