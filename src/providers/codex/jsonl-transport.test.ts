@@ -5,6 +5,7 @@ import {
   JsonRpcTransportClosedError,
   JsonRpcTimeoutError,
 } from "./jsonl-transport";
+import { CodexServerRequestBroker } from "./server-request-broker";
 
 function createTransport(options: ConstructorParameters<typeof JsonlTransport>[0] = {}) {
   const lines: string[] = [];
@@ -236,6 +237,24 @@ describe("JsonlTransport", () => {
     expect(JSON.parse(lines[0]!)).toEqual({
       id: 2,
       error: { code: -32603, message: "denied" },
+    });
+  });
+
+  it("writes method-not-found for an unknown brokered server request", async () => {
+    const broker = new CodexServerRequestBroker(() => undefined);
+    const { lines, transport } = createTransport({
+      onServerRequest: (request) => broker.handle(request as never),
+    });
+
+    transport.push('{"id":99,"method":"future/request","params":{}}\n');
+    await vi.waitFor(() => expect(lines).toHaveLength(1));
+
+    expect(JSON.parse(lines[0]!)).toEqual({
+      id: 99,
+      error: {
+        code: -32601,
+        message: 'No handler for server request "future/request"',
+      },
     });
   });
 

@@ -45,6 +45,40 @@ export type ProviderContentBlock =
   | { type: "tool_use"; id: string; name: string; input: any }
   | { type: "tool_result"; toolUseId: string; content: unknown };
 
+export type ProviderToolKind =
+  | "command_execution"
+  | "file_change"
+  | "mcp_tool_call"
+  | "dynamic_tool_call"
+  | "web_search"
+  | "image_view"
+  | "unknown";
+
+export interface ProviderToolActivity {
+  id: string;
+  kind: ProviderToolKind;
+  name: string;
+  status?: string;
+  input?: unknown;
+  output?: unknown;
+  outputDelta?: string;
+  changes?: Array<{ path: string; kind: string; diff: string }>;
+  metadata?: Record<string, unknown>;
+}
+
+export type ProviderApprovalKind =
+  | "command_execution"
+  | "file_change"
+  | "permissions";
+
+export type ProviderApprovalDecision =
+  | "allow"
+  | "allow_session"
+  | "allow_execpolicy_amendment"
+  | "apply_network_policy_amendment"
+  | "deny"
+  | "cancel";
+
 export type ProviderEvent =
   | { type: "session_metadata"; sessionId: string; providerState?: unknown }
   | { type: "compaction_boundary" }
@@ -53,8 +87,46 @@ export type ProviderEvent =
       source: "user" | "assistant";
       blocks: ProviderContentBlock[];
     }
-  | { type: "text_delta"; delta: string }
-  | { type: "thinking_delta"; delta: string }
+  | { type: "text_delta"; delta: string; itemId?: string }
+  | {
+      type: "thinking_delta";
+      delta: string;
+      itemId?: string;
+      channel?: "summary" | "content";
+      index?: number;
+    }
+  | {
+      type: "reasoning_completed";
+      itemId: string;
+      summary: string[];
+      content: string[];
+    }
+  | { type: "plan_delta"; itemId: string; delta: string }
+  | {
+      type: "plan_updated";
+      itemId?: string;
+      text?: string;
+      explanation?: string | null;
+      steps?: Array<{ step: string; status: string }>;
+      final: boolean;
+    }
+  | {
+      type: "tool_activity";
+      phase: "started" | "updated" | "completed";
+      tool: ProviderToolActivity;
+    }
+  | {
+      type: "subagent_activity";
+      phase: "started" | "completed";
+      operation: "spawn_agent" | "send_input" | "wait" | "close_agent";
+      id: string;
+      status: string;
+      senderThreadId: string;
+      receiverThreadIds: string[];
+      newThreadIds: string[];
+      prompt: string | null;
+      agents: Record<string, { status: string; message: string | null }>;
+    }
   | { type: "tool_started"; tool: Omit<ToolCallData, "result"> }
   | { type: "tool_input_delta"; delta: string }
   | { type: "tool_stopped" }
@@ -64,11 +136,26 @@ export type ProviderEvent =
       toolName: string;
       input?: any;
       autoApprove?: boolean;
+      approvalKind?: ProviderApprovalKind;
+      threadId?: string;
+      turnId?: string;
+      itemId?: string;
+      reason?: string | null;
+      availableDecisions?: ProviderApprovalDecision[];
+      proposedAmendments?: {
+        execpolicy?: string[] | null;
+        networkPolicy?: Array<{ host: string; action: string }> | null;
+      };
+      grantScopes?: Array<"turn" | "session">;
     }
   | {
       type: "question_requested";
       requestId: string;
       questions: ProviderQuestion[];
+      threadId?: string;
+      turnId?: string;
+      itemId?: string;
+      autoResolutionMs?: number | null;
     }
   | {
       type: "plan_review_requested";
@@ -76,9 +163,28 @@ export type ProviderEvent =
       planContent: string | null;
       allowedPrompts: { tool: string; prompt: string }[];
     }
-  | { type: "token_usage"; inputTokens: number }
-  | { type: "turn_completed"; contextWindow?: number }
-  | { type: "error"; message: string }
+  | {
+      type: "request_resolved";
+      requestId: string;
+      reason: "server" | "auto";
+    }
+  | {
+      type: "token_usage";
+      inputTokens: number;
+      outputTokens?: number;
+      cachedInputTokens?: number;
+      reasoningOutputTokens?: number;
+      totalTokens?: number;
+      contextWindow?: number;
+    }
+  | {
+      type: "turn_completed";
+      contextWindow?: number;
+      status?: "completed" | "interrupted" | "failed";
+      error?: string;
+    }
+  | { type: "warning"; message: string }
+  | { type: "error"; message: string; willRetry?: boolean; details?: string | null }
   | { type: "closed"; exitCode: number | null };
 
 export type ProviderApprovalBehavior = "allow" | "allow_always" | "deny";

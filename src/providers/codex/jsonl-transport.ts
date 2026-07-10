@@ -284,7 +284,13 @@ export class JsonlTransport {
       this.respond(request.id, result === undefined ? null : result);
     } catch (error) {
       if (!this.disposedError) {
-        this.respondError(request.id, -32603, asError(error).message);
+        const rpcError = asRpcResponseError(error);
+        this.respondError(
+          request.id,
+          rpcError?.code ?? -32603,
+          asError(error).message,
+          rpcError?.data,
+        );
       }
     }
   }
@@ -323,4 +329,16 @@ function isResponseError(
 
 function asError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
+}
+
+function asRpcResponseError(
+  value: unknown,
+): { code: number; data?: unknown } | undefined {
+  if (!isRecord(value) || typeof value.code !== "number" || !Number.isFinite(value.code)) {
+    return undefined;
+  }
+  return {
+    code: value.code,
+    ...(value.data === undefined ? {} : { data: value.data }),
+  };
 }

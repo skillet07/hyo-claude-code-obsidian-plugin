@@ -51,10 +51,13 @@ export interface AskQuestionData {
 }
 
 export interface ProviderQuestion {
+  id?: string;
   question: string;
   header?: string;
   options?: { label: string; description?: string }[];
   multiSelect?: boolean;
+  isOther?: boolean;
+  isSecret?: boolean;
 }
 
 export interface PlanReviewData {
