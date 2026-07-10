@@ -55,6 +55,17 @@ export class SessionLifecycle<Runtime extends SessionRuntime> {
     return tabIds;
   }
 
+  detachWhere(predicate: (runtime: Runtime) => boolean): string[] {
+    const tabIds: string[] = [];
+    for (const [tabId, entry] of this.runtimes) {
+      if (!predicate(entry.runtime)) continue;
+      this.runtimes.delete(tabId);
+      this.busyTabs.delete(tabId);
+      tabIds.push(tabId);
+    }
+    return tabIds;
+  }
+
   beginTurn(tabId: string): boolean {
     if (this.busyTabs.has(tabId)) return false;
     this.busyTabs.add(tabId);

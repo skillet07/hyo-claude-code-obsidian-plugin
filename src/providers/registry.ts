@@ -19,4 +19,8 @@ export class ProviderRegistry {
     if (!provider) throw new Error(`Provider "${id}" is not registered`);
     return provider;
   }
+
+  entries(): Array<[ProviderId, ChatProvider]> {
+    return [...this.providers.entries()];
+  }
 }

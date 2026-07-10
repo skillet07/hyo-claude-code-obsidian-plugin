@@ -1,9 +1,11 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import type { App } from "obsidian";
 import type HyoPlugin from "../main";
 import { ChatPanel } from "./ChatPanel";
 import { useSessionManager } from "../hooks/useSessionManager";
 import { checkCliExists } from "../claude-transport";
+import { createClaudeProvider } from "../providers/claude/provider";
+import { createCodexProvider } from "../providers/codex/provider";
 
 interface HyoAppProps {
   app: App;
@@ -33,6 +35,19 @@ export function HyoApp({ app, plugin }: HyoAppProps) {
       )
     : vaultPath;
 
+  const claudeProvider = useMemo(
+    () => createClaudeProvider({ cliPath: plugin.settings.cliPath }),
+    [plugin.settings.cliPath],
+  );
+  const codexProvider = useMemo(
+    () => createCodexProvider({ appVersion: plugin.manifest.version }),
+    [plugin.manifest.version],
+  );
+  const providers = useMemo(
+    () => [claudeProvider, codexProvider],
+    [claudeProvider, codexProvider],
+  );
+
   const sessionManager = useSessionManager({
     cliPath: plugin.settings.cliPath,
     cwd: workingDirectory,
@@ -42,6 +57,8 @@ export function HyoApp({ app, plugin }: HyoAppProps) {
     maxOutputTokens: plugin.settings.maxOutputTokens,
     autoGenerateTitles: plugin.settings.autoGenerateTitles,
     settingsVersion,
+    providers,
+    defaultProviderId: "claude",
   });
 
   if (cliFound === null) {

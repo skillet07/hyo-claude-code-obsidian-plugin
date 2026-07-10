@@ -11,6 +11,7 @@ export {
 export type {
   ChatProvider,
   ProviderApprovalBehavior,
+  ProviderApprovalPolicy,
   ProviderCapabilities,
   ProviderContentBlock,
   ProviderEvent,
@@ -28,6 +29,8 @@ export type {
   ProviderRecoveryResult,
   ProviderRuntime,
   ProviderRuntimeOptions,
+  ProviderSandboxMode,
+  ProviderSessionOptions,
   ProviderSessionSummary,
   ProviderSkillInfo,
 } from "./types";

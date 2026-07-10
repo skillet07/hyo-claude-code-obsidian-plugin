@@ -15,6 +15,7 @@ import type {
   ProviderRecoveryResult,
   ProviderRuntime,
   ProviderSessionSummary,
+  ProviderSessionOptions,
 } from "../providers/types";
 import {
   applyAgentMessageCompletion,
@@ -47,6 +48,10 @@ export interface TabSession {
   messages: Message[];
   generating: boolean;
   model: string;
+  reasoningEffort?: string;
+  approvalPolicy?: ProviderSessionOptions["approvalPolicy"];
+  sandboxMode?: ProviderSessionOptions["sandboxMode"];
+  networkAccess?: boolean;
   permissionMode: string;
   agent: string;
   inputTokens: number;
@@ -59,7 +64,7 @@ interface SessionState {
   activeTabId: string;
 }
 
-interface SessionManagerOptions {
+export interface SessionManagerOptions {
   cliPath: string;
   cwd: string;
   model: string;
@@ -68,6 +73,8 @@ interface SessionManagerOptions {
   maxOutputTokens?: number;
   settingsVersion?: number;
   autoGenerateTitles?: boolean;
+  providers?: ChatProvider[];
+  defaultProviderId?: ProviderId;
 }
 
 // ------- utilities -------
@@ -183,23 +190,37 @@ function buildSnapshot(ss: StreamState) {
   };
 }
 
+function serializeProviderValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined) return "completed";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 // ------- hook -------
 
 export function useSessionManager(options: SessionManagerOptions) {
-  const provider = useMemo(
-    () =>
-      new ProviderRegistry([
-        createClaudeProvider({ cliPath: options.cliPath }),
-      ]).resolve("claude"),
-    [options.cliPath],
+  const providers = useMemo(
+    () => options.providers ?? [createClaudeProvider({ cliPath: options.cliPath })],
+    [options.providers, options.cliPath],
   );
+  const registry = useMemo(() => new ProviderRegistry(providers), [providers]);
+  const providerMap = useMemo(
+    () => new Map<ProviderId, ChatProvider>(registry.entries()),
+    [registry],
+  );
+  const defaultProviderId = options.defaultProviderId ?? "claude";
+  registry.resolve(defaultProviderId);
   const [state, setState] = useState<SessionState>(() => {
     const id = genId();
     return {
       tabs: [
         {
           id,
-          providerId: "claude",
+          providerId: defaultProviderId,
           providerSessionId: null,
           providerState: null,
           title: "New conversation",
@@ -217,27 +238,42 @@ export function useSessionManager(options: SessionManagerOptions) {
   });
 
   const [pastSessions, setPastSessions] = useState<ProviderSessionSummary[]>([]);
+  const pastSessionsRef = useRef(pastSessions);
+  pastSessionsRef.current = pastSessions;
 
   const lifecycleRef = useRef(new SessionLifecycle<ProviderRuntime>());
-  const activeProviderRef = useRef(provider);
+  const registryRef = useRef(registry);
+  registryRef.current = registry;
+  const providersRef = useRef(providerMap);
+  const defaultProviderIdRef = useRef(defaultProviderId);
+  defaultProviderIdRef.current = defaultProviderId;
   const streamStatesRef = useRef<Record<string, StreamState>>({});
   const visibleProviderErrorsRef = useRef<Record<string, string>>({});
   const openingSessionsRef = useRef(
     new WeakMap<ChatProvider, Set<string>>(),
   );
+  const historyRequestRef = useRef(0);
   const scrollRef = useRef({ nearBottom: true });
+  const mountedRef = useRef(true);
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  // Provider replacement happens while mounted, so finalize only tabs owned
-  // by the retired provider. Detach leases first so teardown callbacks cannot
-  // mutate those tabs or a successor runtime.
+  // Provider replacement happens while mounted. Detach only leases owned by
+  // the retired provider so other providers can keep generating concurrently.
   useEffect(() => {
-    const previousProvider = activeProviderRef.current;
-    if (previousProvider === provider) return;
-
-    activeProviderRef.current = provider;
-    const retiredTabIds = new Set(lifecycleRef.current.detachAll());
+    const previousProviders = providersRef.current;
+    providersRef.current = providerMap;
+    const retiredTabIds = new Set<string>();
+    for (const [providerId, previousProvider] of previousProviders) {
+      if (providerMap.get(providerId) === previousProvider) continue;
+      for (const tabId of lifecycleRef.current.detachWhere(
+        (runtime) => runtime.providerId === providerId,
+      )) {
+        retiredTabIds.add(tabId);
+      }
+      previousProvider.cleanup();
+    }
+    if (retiredTabIds.size === 0) return;
     for (const tabId of retiredTabIds) delete streamStatesRef.current[tabId];
     setState((prev) => ({
       ...prev,
@@ -255,14 +291,14 @@ export function useSessionManager(options: SessionManagerOptions) {
           : tab,
       ),
     }));
-    previousProvider.cleanup();
-  }, [provider]);
+  }, [providerMap]);
 
   // Unmount teardown must not enqueue React state updates.
   useEffect(() => {
     return () => {
+      mountedRef.current = false;
       lifecycleRef.current.detachAll();
-      activeProviderRef.current.cleanup();
+      for (const provider of providersRef.current.values()) provider.cleanup();
     };
   }, []);
 
@@ -319,7 +355,7 @@ export function useSessionManager(options: SessionManagerOptions) {
   }, [updateTabLastAssistant]);
 
   const makeProcessEvent = useCallback(
-    (tabId: string, lease: RuntimeLease) => (event: ProviderEvent) => {
+    (tabId: string, lease: RuntimeLease, provider: ChatProvider) => (event: ProviderEvent) => {
       const lifecycle = lifecycleRef.current;
       if (!lifecycle.ownsRuntime(lease)) return;
 
@@ -597,6 +633,80 @@ export function useSessionManager(options: SessionManagerOptions) {
         return;
       }
 
+      if (event.type === "tool_activity") {
+        let tool = ss.toolCalls.find((item) => item.id === event.tool.id);
+        const input = event.tool.input ??
+          (event.tool.changes ? { changes: event.tool.changes } : event.tool.metadata ?? {});
+        if (!tool) {
+          tool = {
+            id: event.tool.id,
+            name: event.tool.name,
+            input,
+            result: null,
+          };
+          ss.toolCalls.push(tool);
+          ss.orderedBlocks.push({
+            type: "tool",
+            toolId: tool.id,
+            turnIndex: ss.turnIndex,
+          });
+        } else {
+          tool.name = event.tool.name || tool.name;
+          if (event.tool.input !== undefined || event.tool.changes || event.tool.metadata) {
+            tool.input = input;
+          }
+        }
+        if (event.tool.outputDelta) {
+          tool.result = `${tool.result ?? ""}${event.tool.outputDelta}`;
+        }
+        if (event.tool.output !== undefined) {
+          tool.result = serializeProviderValue(event.tool.output);
+        } else if (event.phase === "completed" && !event.tool.outputDelta) {
+          tool.result = event.tool.status || "completed";
+        }
+        if (event.phase === "completed") ss.toolResultSinceLastText = true;
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
+      if (event.type === "subagent_activity" || event.type === "subagent_status") {
+        const name = event.type === "subagent_activity"
+          ? event.operation
+          : `subagent_${event.activity}`;
+        const input = event.type === "subagent_activity"
+          ? {
+              prompt: event.prompt,
+              senderThreadId: event.senderThreadId,
+              receiverThreadIds: event.receiverThreadIds,
+              newThreadIds: event.newThreadIds,
+            }
+          : { agentThreadId: event.agentThreadId, agentPath: event.agentPath };
+        const result = event.type === "subagent_activity"
+          ? serializeProviderValue({ status: event.status, agents: event.agents })
+          : serializeProviderValue({ phase: event.phase });
+        const existing = ss.toolCalls.find((item) => item.id === event.id);
+        if (existing) {
+          existing.name = name;
+          existing.input = input;
+          existing.result = event.phase === "completed" ? result : existing.result;
+        } else {
+          ss.toolCalls.push({
+            id: event.id,
+            name,
+            input,
+            result: event.phase === "completed" ? result : null,
+          });
+          ss.orderedBlocks.push({
+            type: "tool",
+            toolId: event.id,
+            turnIndex: ss.turnIndex,
+          });
+        }
+        if (event.phase === "completed") ss.toolResultSinceLastText = true;
+        updateTabLastAssistant(tabId, () => buildSnapshot(ss));
+        return;
+      }
+
       if (event.type === "tool_started") {
         const tool: ToolCallData = { ...event.tool, result: null };
         if (!ss.toolCalls.find((item) => item.id === tool.id)) {
@@ -672,7 +782,6 @@ export function useSessionManager(options: SessionManagerOptions) {
     },
     [
       options.autoGenerateTitles,
-      provider,
       surfaceProviderError,
       updateTabLastAssistant,
     ],
@@ -683,20 +792,19 @@ export function useSessionManager(options: SessionManagerOptions) {
   const newTab = useCallback(() => {
     const id = genId();
     setState((prev) => {
-      const activeTab = prev.tabs.find((t) => t.id === prev.activeTabId);
       return {
         tabs: [
           ...prev.tabs,
           {
             id,
-            providerId: "claude",
+            providerId: defaultProviderId,
             providerSessionId: null,
             providerState: null,
             title: "New conversation",
             messages: [],
             generating: false,
-            model: activeTab?.model || options.model,
-            permissionMode: activeTab?.permissionMode || options.permissionMode,
+            model: options.model,
+            permissionMode: options.permissionMode,
             agent: options.defaultAgent,
             inputTokens: 0,
             voiceMode: false,
@@ -705,7 +813,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         activeTabId: id,
       };
     });
-  }, [options.model, options.permissionMode]);
+  }, [defaultProviderId, options.defaultAgent, options.model, options.permissionMode]);
 
   const closeTab = useCallback((tabIdToClose: string) => {
     lifecycleRef.current.cleanupRuntime(tabIdToClose);
@@ -720,7 +828,7 @@ export function useSessionManager(options: SessionManagerOptions) {
           tabs: [
             {
               id: newId,
-              providerId: "claude",
+              providerId: defaultProviderId,
               providerSessionId: null,
               providerState: null,
               title: "New conversation",
@@ -746,7 +854,7 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       return { tabs: remaining, activeTabId };
     });
-  }, []);
+  }, [defaultProviderId, options.defaultAgent, options.model, options.permissionMode]);
 
   const switchTab = useCallback((id: string) => {
     setState((prev) => ({ ...prev, activeTabId: id }));
@@ -754,33 +862,32 @@ export function useSessionManager(options: SessionManagerOptions) {
   }, []);
 
   const renameTab = useCallback((id: string, title: string) => {
-    setState((prev) => {
-      const tab = prev.tabs.find((t) => t.id === id);
-
-      // If this tab has a persisted session, save the custom title and refresh dropdown
-      if (tab?.providerSessionId) {
-        void provider
-          .renameSession(options.cwd, tab.providerSessionId, title)
-          .then(() => refreshPastSessions())
-          .catch((error) => {
-            console.error("[hyo] Failed to rename session:", error);
-          });
-      }
-
-      return {
-        ...prev,
-        tabs: prev.tabs.map((t) =>
-          t.id === id ? { ...t, title } : t
-        ),
-      };
-    });
-  }, [options.cwd, provider]); // refreshPastSessions intentionally omitted — declared later, referenced via closure
+    const tab = stateRef.current.tabs.find((item) => item.id === id);
+    if (tab?.providerSessionId) {
+      const provider = registryRef.current.resolve(tab.providerId);
+      void provider
+        .renameSession(options.cwd, tab.providerSessionId, title)
+        .then(() => refreshPastSessions(tab.providerId))
+        .catch((error) => {
+          console.error("[hyo] Failed to rename session:", error);
+        });
+    }
+    setState((prev) => ({
+      ...prev,
+      tabs: prev.tabs.map((item) =>
+        item.id === id ? { ...item, title } : item
+      ),
+    }));
+  }, [options.cwd]); // refreshPastSessions intentionally omitted — declared later, referenced via closure
 
   // ------- messaging -------
 
   const sendMessage = useCallback(
     (content: string | any[], meta?: { displayText?: string; attachedFileNames?: string[]; isCompaction?: boolean }) => {
       const tabId = stateRef.current.activeTabId;
+      const owningTab = stateRef.current.tabs.find((tab) => tab.id === tabId);
+      if (!owningTab) return false;
+      const provider = registryRef.current.resolve(owningTab.providerId);
       const lifecycle = lifecycleRef.current;
       if (!lifecycle.beginTurn(tabId)) return false;
       delete visibleProviderErrorsRef.current[tabId];
@@ -847,6 +954,10 @@ export function useSessionManager(options: SessionManagerOptions) {
         runtime = provider.createRuntime({
           cwd: options.cwd,
           model: currentTab?.model || options.model,
+          reasoningEffort: currentTab?.reasoningEffort,
+          approvalPolicy: currentTab?.approvalPolicy,
+          sandboxMode: currentTab?.sandboxMode,
+          networkAccess: currentTab?.networkAccess,
           permissionMode: currentTab?.permissionMode || options.permissionMode,
           agent: currentTab?.agent || "",
           providerSessionId: providerSessionId || undefined,
@@ -856,7 +967,7 @@ export function useSessionManager(options: SessionManagerOptions) {
           onEvent: (event) => dispatchEvent(event),
         });
         const lease = lifecycle.attachRuntime(tabId, runtime);
-        dispatchEvent = makeProcessEvent(tabId, lease);
+        dispatchEvent = makeProcessEvent(tabId, lease, provider);
         try {
           runtime.start();
         } catch (error) {
@@ -866,14 +977,15 @@ export function useSessionManager(options: SessionManagerOptions) {
       }
 
       try {
-        runtime.send(content);
+        if (meta?.isCompaction) runtime.compact();
+        else runtime.send(content);
       } catch (error) {
         lifecycle.finishTurn(tabId);
         throw error;
       }
       return true;
     },
-    [options, makeProcessEvent, provider]
+    [options, makeProcessEvent]
   );
 
   const sendPermissionResponse = useCallback(
@@ -965,15 +1077,55 @@ export function useSessionManager(options: SessionManagerOptions) {
     updateTabLastAssistant(tabId, () => ({ streaming: false }));
   }, [updateTabLastAssistant]);
 
-  const setTabModel = useCallback((model: string) => {
-    const normalized = provider.normalizeModelId?.(model) ?? model;
+  const setTabProviderOptions = useCallback((updates: Partial<ProviderSessionOptions>) => {
+    const tabId = stateRef.current.activeTabId;
+    lifecycleRef.current.cleanupRuntime(tabId);
+    delete streamStatesRef.current[tabId];
     setState((prev) => ({
       ...prev,
-      tabs: prev.tabs.map((tab) =>
-        tab.id === prev.activeTabId ? { ...tab, model: normalized } : tab
-      ),
+      tabs: prev.tabs.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        const provider = registryRef.current.resolve(tab.providerId);
+        return {
+          ...tab,
+          ...updates,
+          generating: false,
+          messages: tab.messages.map((message) =>
+            message.role === "assistant" && message.streaming
+              ? { ...message, streaming: false }
+              : message,
+          ),
+          ...(updates.model
+            ? { model: provider.normalizeModelId?.(updates.model) ?? updates.model }
+            : {}),
+        };
+      }),
     }));
-  }, [provider]);
+  }, []);
+
+  const setTabModel = useCallback((model: string) => {
+    setTabProviderOptions({ model });
+  }, [setTabProviderOptions]);
+
+  const setTabReasoningEffort = useCallback((reasoningEffort?: string) => {
+    setTabProviderOptions({ reasoningEffort });
+  }, [setTabProviderOptions]);
+
+  const setTabApprovalPolicy = useCallback((
+    approvalPolicy?: ProviderSessionOptions["approvalPolicy"],
+  ) => {
+    setTabProviderOptions({ approvalPolicy });
+  }, [setTabProviderOptions]);
+
+  const setTabSandboxMode = useCallback((
+    sandboxMode?: ProviderSessionOptions["sandboxMode"],
+  ) => {
+    setTabProviderOptions({ sandboxMode });
+  }, [setTabProviderOptions]);
+
+  const setTabNetworkAccess = useCallback((networkAccess?: boolean) => {
+    setTabProviderOptions({ networkAccess });
+  }, [setTabProviderOptions]);
 
   const setTabPermissionMode = useCallback((permissionMode: string) => {
     setState((prev) => ({
@@ -1015,18 +1167,44 @@ export function useSessionManager(options: SessionManagerOptions) {
 
   // ------- past sessions -------
 
-  const refreshPastSessions = useCallback(async () => {
+  const activeProviderIdForHistory =
+    state.tabs.find((tab) => tab.id === state.activeTabId)?.providerId ??
+    defaultProviderId;
+
+  const refreshPastSessions = useCallback(async (requestedProviderId?: ProviderId) => {
+    const activeProviderId =
+      stateRef.current.tabs.find((tab) => tab.id === stateRef.current.activeTabId)?.providerId ??
+      defaultProviderId;
+    const providerId = requestedProviderId ?? activeProviderId;
+    if (providerId !== activeProviderId) return;
+    const provider = registryRef.current.resolve(providerId);
+    const request = ++historyRequestRef.current;
     try {
       const sessions = await provider.listSessions(options.cwd);
-      setPastSessions(sessions);
+      const currentActiveProviderId = stateRef.current.tabs.find(
+        (tab) => tab.id === stateRef.current.activeTabId,
+      )?.providerId;
+      if (
+        request !== historyRequestRef.current ||
+        currentActiveProviderId !== providerId ||
+        providersRef.current.get(providerId) !== provider
+      ) return;
+      if (sessions.length === 0 && pastSessionsRef.current.length === 0) return;
+      setPastSessions(sessions.map((session) => ({ ...session, providerId })));
     } catch (e) {
-      console.error("[hyo] Failed to list past sessions:", e);
+      if (mountedRef.current && providersRef.current.get(providerId) === provider) {
+        console.error("[hyo] Failed to list past sessions:", e);
+      }
     }
-  }, [options.cwd, provider]);
+  }, [defaultProviderId, options.cwd]);
 
   useEffect(() => {
+    if (pastSessionsRef.current.length > 0) {
+      pastSessionsRef.current = [];
+      setPastSessions([]);
+    }
     void refreshPastSessions();
-  }, [refreshPastSessions]);
+  }, [activeProviderIdForHistory, defaultProviderId, refreshPastSessions, registry]);
 
   const openPastSession = useCallback(async (pastSession: PastSession) => {
     const existing = stateRef.current.tabs.find(
@@ -1039,12 +1217,17 @@ export function useSessionManager(options: SessionManagerOptions) {
       return;
     }
 
+    const provider = registryRef.current.resolve(pastSession.providerId);
     const providerOpenings = openingSessionsRef.current.get(provider) ?? new Set<string>();
     openingSessionsRef.current.set(provider, providerOpenings);
     const openingKey = `${pastSession.providerId}\u0000${pastSession.id}`;
     if (providerOpenings.has(openingKey)) return;
     providerOpenings.add(openingKey);
 
+    const activeProviderIdAtStart = stateRef.current.tabs.find(
+      (tab) => tab.id === stateRef.current.activeTabId,
+    )?.providerId;
+    const defaultProviderIdAtStart = defaultProviderId;
     let history: ProviderHistoryMessage[];
     try {
       history = await provider.loadSession(options.cwd, pastSession.id);
@@ -1054,7 +1237,14 @@ export function useSessionManager(options: SessionManagerOptions) {
     } finally {
       providerOpenings.delete(openingKey);
     }
-    if (activeProviderRef.current !== provider) return;
+    const activeProviderId = stateRef.current.tabs.find(
+      (tab) => tab.id === stateRef.current.activeTabId,
+    )?.providerId;
+    if (
+      providersRef.current.get(pastSession.providerId) !== provider ||
+      activeProviderId !== activeProviderIdAtStart ||
+      defaultProviderIdRef.current !== defaultProviderIdAtStart
+    ) return;
     const openedWhileLoading = stateRef.current.tabs.find(
       (tab) =>
         tab.providerId === pastSession.providerId &&
@@ -1075,7 +1265,6 @@ export function useSessionManager(options: SessionManagerOptions) {
 
     const id = genId();
     setState((prev) => {
-      const activeTab = prev.tabs.find((t) => t.id === prev.activeTabId);
       return {
         tabs: [
           ...prev.tabs,
@@ -1087,8 +1276,8 @@ export function useSessionManager(options: SessionManagerOptions) {
             title: pastSession.title,
             messages,
             generating: false,
-            model: activeTab?.model || options.model,
-            permissionMode: activeTab?.permissionMode || options.permissionMode,
+            model: options.model,
+            permissionMode: options.permissionMode,
             agent: options.defaultAgent,
             inputTokens: 0,
             voiceMode: false,
@@ -1097,7 +1286,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         activeTabId: id,
       };
     });
-  }, [options.cwd, options.model, options.permissionMode, options.defaultAgent, provider]);
+  }, [defaultProviderId, options.cwd, options.model, options.permissionMode, options.defaultAgent]);
 
   const compact = useCallback(() => {
     return sendMessage("/compact", { isCompaction: true });
@@ -1121,6 +1310,7 @@ export function useSessionManager(options: SessionManagerOptions) {
         };
       }
 
+      const provider = registryRef.current.resolve(tab.providerId);
       const result = await provider.recoverSession(
         options.cwd,
         tab.providerSessionId,
@@ -1171,12 +1361,13 @@ export function useSessionManager(options: SessionManagerOptions) {
 
       return result;
     },
-    [options.cwd, provider]
+    [options.cwd]
   );
 
   // ------- return -------
 
   const activeTab = state.tabs.find((t) => t.id === state.activeTabId);
+  const activeProvider = registry.resolve(activeTab?.providerId ?? defaultProviderId);
 
   return {
     tabs: state.tabs,
@@ -1190,11 +1381,26 @@ export function useSessionManager(options: SessionManagerOptions) {
     activeTabHasSession: !!activeTab?.providerSessionId,
     activeInputTokens: activeTab?.inputTokens || 0,
     activeContextWindow: activeTab?.contextWindow,
+    activeProviderId: activeProvider.id,
+    activeProvider,
+    activeProviderCapabilities: activeProvider.capabilities,
+    activeProviderOptions: {
+      model: activeTab?.model || options.model,
+      reasoningEffort: activeTab?.reasoningEffort,
+      approvalPolicy: activeTab?.approvalPolicy,
+      sandboxMode: activeTab?.sandboxMode,
+      networkAccess: activeTab?.networkAccess,
+    } satisfies ProviderSessionOptions,
     newTab,
     closeTab,
     switchTab,
     renameTab,
     setTabModel,
+    setTabProviderOptions,
+    setTabReasoningEffort,
+    setTabApprovalPolicy,
+    setTabSandboxMode,
+    setTabNetworkAccess,
     setTabPermissionMode,
     setTabAgent,
     toggleVoiceMode,

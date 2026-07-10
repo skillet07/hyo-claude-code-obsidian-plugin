@@ -259,6 +259,33 @@ describe("CodexProvider runtime lifecycle", () => {
     expect(secondEvents).toContainEqual(expect.objectContaining({ type: "session_metadata", sessionId: "thread-2" }));
   });
 
+  it("applies generic session options to thread and turn requests", async () => {
+    const { provider, client } = createHarness();
+    const runtime = provider.createRuntime(runtimeOptions(() => undefined, {
+      reasoningEffort: "high",
+      approvalPolicy: "never",
+      sandboxMode: "read-only",
+      networkAccess: true,
+    }));
+
+    runtime.start();
+    runtime.send("configured");
+    await vi.waitFor(() => expect(client.turnStart).toHaveBeenCalledTimes(1));
+
+    expect(client.threadStart).toHaveBeenCalledWith({
+      cwd: "/vault",
+      model: "gpt-5.4",
+      approvalPolicy: "never",
+      sandbox: "read-only",
+    });
+    expect(client.turnStart).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      input: [{ type: "text", text: "configured", text_elements: [] }],
+      effort: "high",
+      sandboxPolicy: { type: "readOnly", networkAccess: true },
+    });
+  });
+
   it("buffers an early notification until turn/start returns and then flushes it", async () => {
     let handlers!: CodexConnectionHandlers;
     const turnStart = vi.fn(async ({ threadId }) => {
@@ -486,7 +513,8 @@ describe("CodexProvider runtime lifecycle", () => {
 
   it("resumes existing threads and supports interrupt, compact, and rename", async () => {
     const { provider, client } = createHarness();
-    const runtime = provider.createRuntime(runtimeOptions(() => undefined, {
+    const events: ProviderEvent[] = [];
+    const runtime = provider.createRuntime(runtimeOptions((event) => events.push(event), {
       providerState: { threadId: "thread-existing", currentTurnId: "turn-prior" },
       resume: true,
     }));
@@ -507,6 +535,10 @@ describe("CodexProvider runtime lifecycle", () => {
     await provider.renameSession("/vault", "thread-existing", "Renamed");
     await vi.waitFor(() => expect(client.turnInterrupt).toHaveBeenCalledWith({ threadId: "thread-existing", turnId: "turn-1" }));
     expect(client.threadCompact).toHaveBeenCalledWith({ threadId: "thread-existing" });
+    await vi.waitFor(() => expect(events.slice(-2)).toEqual([
+      { type: "compaction_boundary" },
+      { type: "turn_completed", status: "completed" },
+    ]));
     expect(client.threadSetName).toHaveBeenCalledWith({ threadId: "thread-existing", name: "Renamed" });
   });
 

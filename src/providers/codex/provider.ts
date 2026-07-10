@@ -946,6 +946,9 @@ export class CodexRuntime implements ProviderRuntime {
       const connection = await this.provider.ensureRuntimeThread(this);
       if (!this.threadId) throw new Error("Codex thread is not ready");
       await connection.client.threadCompact({ threadId: this.threadId });
+      if (this.cleaned) return;
+      this.options.onEvent({ type: "compaction_boundary" });
+      this.options.onEvent({ type: "turn_completed", status: "completed" });
     })().catch((error: unknown) => this.reportError(error));
   }
 
@@ -1097,6 +1100,12 @@ export class CodexRuntime implements ProviderRuntime {
       response = await connection.client.turnStart({
         threadId: this.threadId,
         input,
+        ...(this.options.reasoningEffort === undefined
+          ? {}
+          : { effort: this.options.reasoningEffort }),
+        ...(this.options.networkAccess === undefined
+          ? {}
+          : { sandboxPolicy: turnSandboxPolicy(this.options) }),
       });
     } catch (error) {
       this.awaitingTurnGeneration = undefined;
@@ -1171,8 +1180,25 @@ function threadConfiguration(options: ProviderRuntimeOptions): Omit<ThreadStartP
   return {
     cwd: options.cwd,
     model: options.model,
-    approvalPolicy: mapApprovalPolicy(options.permissionMode),
-    sandbox: mapSandbox(options.permissionMode),
+    approvalPolicy: options.approvalPolicy ?? mapApprovalPolicy(options.permissionMode),
+    sandbox: options.sandboxMode ?? mapSandbox(options.permissionMode),
+  };
+}
+
+function turnSandboxPolicy(
+  options: ProviderRuntimeOptions,
+): NonNullable<TurnStartParams["sandboxPolicy"]> {
+  const mode = options.sandboxMode ?? mapSandbox(options.permissionMode);
+  if (mode === "danger-full-access") return { type: "dangerFullAccess" };
+  if (mode === "read-only") {
+    return { type: "readOnly", networkAccess: options.networkAccess ?? false };
+  }
+  return {
+    type: "workspaceWrite",
+    writableRoots: [],
+    networkAccess: options.networkAccess ?? false,
+    excludeTmpdirEnvVar: false,
+    excludeSlashTmp: false,
   };
 }
 

@@ -275,9 +275,31 @@ export type ProviderEvent =
 
 export type ProviderApprovalBehavior = "allow" | "allow_always" | "deny";
 
+export type ProviderApprovalPolicy =
+  | "untrusted"
+  | "on-request"
+  | "never";
+
+export type ProviderSandboxMode =
+  | "read-only"
+  | "workspace-write"
+  | "danger-full-access";
+
+export interface ProviderSessionOptions {
+  model: string;
+  reasoningEffort?: string;
+  approvalPolicy?: ProviderApprovalPolicy;
+  sandboxMode?: ProviderSandboxMode;
+  networkAccess?: boolean;
+}
+
 export interface ProviderRuntimeOptions {
   cwd: string;
   model: string;
+  reasoningEffort?: string;
+  approvalPolicy?: ProviderApprovalPolicy;
+  sandboxMode?: ProviderSandboxMode;
+  networkAccess?: boolean;
   permissionMode: string;
   agent?: string;
   providerSessionId?: string;
