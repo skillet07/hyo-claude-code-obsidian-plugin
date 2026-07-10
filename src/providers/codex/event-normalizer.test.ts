@@ -341,6 +341,35 @@ describe("CodexEventNormalizer", () => {
     expect(onUnknownNotification).toHaveBeenCalledWith({ method: "future/notification" });
   });
 
+  it("contains malformed known item lifecycle envelopes without payload leakage", () => {
+    const onUnknownNotification = vi.fn();
+    const diagnosticNormalizer = new CodexEventNormalizer({ onUnknownNotification });
+
+    expect(diagnosticNormalizer.normalize({
+      method: "item/started",
+      params: { threadId: "thread-1", turnId: "turn-1", startedAtMs: 1 },
+    } as never)).toEqual([]);
+    expect(diagnosticNormalizer.normalize({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1", turnId: "turn-1", completedAtMs: 2,
+        item: { type: 42, prompt: "sensitive" },
+      },
+    } as never)).toEqual([]);
+    expect(onUnknownNotification.mock.calls).toEqual([
+      [{ method: "item/started" }],
+      [{ method: "item/completed" }],
+    ]);
+
+    const throwingDiagnostic = new CodexEventNormalizer({
+      onUnknownNotification: () => { throw new Error("diagnostic failed"); },
+    });
+    expect(() => throwingDiagnostic.normalize({
+      method: "item/started",
+      params: { threadId: "thread-1", turnId: "turn-1", startedAtMs: 1 },
+    } as never)).not.toThrow();
+  });
+
   it("normalizes compaction, token usage, terminal turn states, warnings, and errors", () => {
     expect(normalizer.normalize({
       method: "thread/compacted", params: { threadId: "thread-1", turnId: "turn-1" },

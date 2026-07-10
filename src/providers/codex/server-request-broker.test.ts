@@ -84,6 +84,47 @@ describe("CodexServerRequestBroker", () => {
     vi.useRealTimers();
   });
 
+  it("contains a request-resolved callback error during auto-resolution", async () => {
+    vi.useFakeTimers();
+    const broker = new CodexServerRequestBroker((event) => {
+      if (event.type === "request_resolved") throw new Error("terminal UI failed");
+    });
+    const pending = broker.handle({
+      method: "item/tool/requestUserInput",
+      id: "auto-terminal-throw",
+      params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "question-item",
+        autoResolutionMs: 100,
+        questions: [{ id: "q", header: "Q", question: "Answer?", isOther: false, isSecret: false, options: null }],
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(pending).resolves.toBeNull();
+    expect(broker.pendingCount).toBe(0);
+    vi.useRealTimers();
+  });
+
+  it("drains every pending request during dispose when terminal callbacks throw", async () => {
+    const broker = new CodexServerRequestBroker((event) => {
+      if (event.type === "request_resolved") throw new Error("terminal UI failed");
+    });
+    const first = broker.handle({ ...commandRequest, id: "dispose-one" });
+    const second = broker.handle({
+      method: "item/fileChange/requestApproval",
+      id: "dispose-two",
+      params: {
+        threadId: "thread-2", turnId: "turn-2", itemId: "file-2",
+        startedAtMs: 2, reason: null, grantRoot: null,
+      },
+    });
+
+    expect(() => broker.dispose()).not.toThrow();
+    expect(broker.pendingCount).toBe(0);
+    await expect(first).resolves.toBeNull();
+    await expect(second).resolves.toBeNull();
+  });
+
   it("rejects a duplicate typed request id before emitting another prompt", async () => {
     const { broker, events } = createBroker();
     const first = broker.handle({ ...commandRequest, id: 7 });

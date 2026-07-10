@@ -292,7 +292,11 @@ export class CodexServerRequestBroker {
     this.requestIdsByUiKey.delete(pending.uiRequestId);
     if (pending.timer) clearTimeout(pending.timer);
     pending.resolve(response);
-    this.onEvent({ type: "request_resolved", requestId: pending.uiRequestId, reason });
+    try {
+      this.onEvent({ type: "request_resolved", requestId: pending.uiRequestId, reason });
+    } catch {
+      // Terminal UI delivery must not escape cleanup or alter promise resolution.
+    }
   }
 
   private rollback(requestId: RequestId, pending: PendingRequest): void {

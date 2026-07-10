@@ -109,19 +109,51 @@ describe("CodexNotificationRouter", () => {
     vi.useRealTimers();
   });
 
-  it("retires a turn explicitly and clears its buffered state", () => {
+  it("retires an owned turn explicitly and cleans its lifecycle state", () => {
     const router = new CodexNotificationRouter();
     router.registerRuntime({ runtimeId: "tab-a", threadId: "thread-a", onEvent: vi.fn() });
     router.route(delta("thread-a", "turn-a", "early", "early"));
     expect(router.getBufferedCount("thread-a", "turn-a")).toBe(1);
+    expect(router.bindTurn("tab-a", "turn-a")).toBe(true);
 
-    router.retireTurn("tab-a", "turn-a");
+    expect(router.retireTurn("tab-a", "turn-a")).toBe(true);
 
     expect(router.getBufferedCount("thread-a", "turn-a")).toBe(0);
     expect(router.getOwnedTurnCount()).toBe(0);
     expect(router.getRetiredTurnCount()).toBe(1);
     router.unregisterRuntime("tab-a");
     expect(router.getRetiredTurnCount()).toBe(0);
+  });
+
+  it("allows only the current owner to retire a turn", () => {
+    const router = new CodexNotificationRouter();
+    const owner = vi.fn();
+    const peer = vi.fn();
+    router.registerRuntime({ runtimeId: "owner", threadId: "shared-thread", onEvent: owner });
+    router.registerRuntime({ runtimeId: "peer", threadId: "shared-thread", onEvent: peer });
+    router.bindTurn("owner", "turn-a");
+
+    expect(router.retireTurn("peer", "turn-a")).toBe(false);
+    expect(router.getOwnedTurnCount()).toBe(1);
+    expect(router.getRetiredTurnCount()).toBe(0);
+    router.route(delta("shared-thread", "turn-a", "item", "owner only"));
+    expect(owner).toHaveBeenCalledWith({ type: "text_delta", delta: "owner only", itemId: "item" });
+    expect(peer).not.toHaveBeenCalled();
+  });
+
+  it("does not resurrect an immutable retired turn on a late duplicate bind", () => {
+    const router = new CodexNotificationRouter();
+    const events = vi.fn();
+    router.registerRuntime({ runtimeId: "tab-a", threadId: "thread-a", onEvent: events });
+    expect(router.bindTurn("tab-a", "turn-a")).toBe(true);
+    expect(router.retireTurn("tab-a", "turn-a")).toBe(true);
+
+    expect(router.bindTurn("tab-a", "turn-a")).toBe(false);
+    router.route(delta("thread-a", "turn-a", "late", "ignored"));
+
+    expect(router.getOwnedTurnCount()).toBe(0);
+    expect(router.getRetiredTurnCount()).toBe(1);
+    expect(events).not.toHaveBeenCalled();
   });
 
   it("evicts oldest pre-bind events at per-item and total caps", () => {

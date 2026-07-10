@@ -71,9 +71,17 @@ export class CodexEventNormalizer {
       case "item/mcpToolCall/progress":
         return [toolUpdate(params?.itemId, "mcp_tool_call", "MCP tool", { outputDelta: params?.message ?? "" })];
       case "item/started":
-        return this.normalizeItemLifecycle("started", params as ItemLifecycleParams);
+        return this.normalizeItemLifecycle(
+          "started",
+          params as ItemLifecycleParams,
+          notification.method,
+        );
       case "item/completed":
-        return this.normalizeItemLifecycle("completed", params as ItemLifecycleParams);
+        return this.normalizeItemLifecycle(
+          "completed",
+          params as ItemLifecycleParams,
+          notification.method,
+        );
       case "thread/compacted":
         return [{ type: "compaction_boundary" }];
       case "thread/tokenUsage/updated": {
@@ -116,12 +124,41 @@ export class CodexEventNormalizer {
           details: params?.error?.additionalDetails ?? null,
         }];
       default:
-        this.options.onUnknownNotification?.({ method: notification.method });
+        this.reportUnknown(notification.method);
         return [];
     }
   }
 
   private normalizeItemLifecycle(
+    phase: "started" | "completed",
+    params: ItemLifecycleParams,
+    method: "item/started" | "item/completed",
+  ): ProviderEvent[] {
+    const rawItem: unknown = (params as { item?: unknown } | undefined)?.item;
+    if (!isRecord(rawItem) || typeof rawItem.type !== "string") {
+      this.reportUnknown(method);
+      return [];
+    }
+    try {
+      return this.normalizeValidItemLifecycle(phase, {
+        ...params,
+        item: rawItem as ItemLifecycleParams["item"],
+      });
+    } catch {
+      this.reportUnknown(method);
+      return [unknownItemEvent(phase, rawItem as UnknownItem)];
+    }
+  }
+
+  private reportUnknown(method: string): void {
+    try {
+      this.options.onUnknownNotification?.({ method });
+    } catch {
+      // Diagnostics must never affect protocol event processing.
+    }
+  }
+
+  private normalizeValidItemLifecycle(
     phase: "started" | "completed",
     params: ItemLifecycleParams,
   ): ProviderEvent[] {

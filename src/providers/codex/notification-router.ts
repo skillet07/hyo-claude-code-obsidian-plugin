@@ -90,23 +90,26 @@ export class CodexNotificationRouter {
     }
   }
 
-  bindTurn(runtimeId: string, turnId: string): void {
+  bindTurn(runtimeId: string, turnId: string): boolean {
     const runtime = this.runtimes.get(runtimeId);
     if (!runtime) throw new Error(`Unknown Codex runtime: ${runtimeId}`);
     const turnKey = makeTurnKey(runtime.threadId, turnId);
-    this.clearRetiredTurn(turnKey);
+    if (this.retiredTurns.has(turnKey)) return false;
     const existingOwner = this.turnOwners.get(turnKey);
     if (existingOwner && existingOwner !== runtimeId) {
       throw new Error(`Codex turn ${turnId} in thread ${runtime.threadId} is already bound`);
     }
     this.turnOwners.set(turnKey, runtimeId);
     this.flush(runtime, turnId);
+    return true;
   }
 
   retireTurn(runtimeId: string, turnId: string): boolean {
     const runtime = this.runtimes.get(runtimeId);
     if (!runtime) return false;
-    this.retireTurnKey(makeTurnKey(runtime.threadId, turnId));
+    const turnKey = makeTurnKey(runtime.threadId, turnId);
+    if (this.turnOwners.get(turnKey) !== runtimeId) return false;
+    this.retireTurnKey(turnKey);
     return true;
   }
 
