@@ -212,6 +212,17 @@ describe("JsonlTransport", () => {
     });
   });
 
+  it("serializes an undefined server-request result as null", async () => {
+    const { lines, transport } = createTransport({
+      onServerRequest: () => undefined,
+    });
+
+    transport.push('{"id":"request-1","method":"approval","params":{}}\n');
+    await vi.waitFor(() => expect(lines).toHaveLength(1));
+
+    expect(JSON.parse(lines[0]!)).toEqual({ id: "request-1", result: null });
+  });
+
   it("writes an error response when a server request handler fails", async () => {
     const { lines, transport } = createTransport({
       onServerRequest: () => {

@@ -144,6 +144,9 @@ describe("CodexAppServerClient", () => {
           return true;
         },
         end: vi.fn(),
+        on() {
+          return this;
+        },
       },
       stdout,
       exit: new Promise((resolve) => {

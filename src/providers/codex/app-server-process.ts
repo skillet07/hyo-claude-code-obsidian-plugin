@@ -1,5 +1,9 @@
 import { spawn as nodeSpawn, type SpawnOptions } from "node:child_process";
-import { assertCodexCliVersion, buildElectronSafePath } from "./codex-cli";
+import {
+  assertCodexCliVersion,
+  buildCodexProcessSpec,
+  buildElectronSafePath,
+} from "./codex-cli";
 
 export interface AppServerReadable {
   on(event: "data", listener: (chunk: Uint8Array | string) => void): this;
@@ -8,6 +12,7 @@ export interface AppServerReadable {
 export interface AppServerWritable {
   write(value: string): boolean;
   end(): void;
+  on(event: "error", listener: (error: Error) => void): this;
 }
 
 export interface AppServerChildProcess {
@@ -43,6 +48,9 @@ export interface SpawnCodexAppServerOptions {
   shutdownTimeoutMs?: number;
   spawn?: AppServerSpawn;
   versionCheck?: (command: string, env: NodeJS.ProcessEnv) => void;
+  platform?: NodeJS.Platform;
+  fileExists?: (path: string) => boolean;
+  comspec?: string;
 }
 
 export interface CodexAppServerProcess {
@@ -59,23 +67,46 @@ export function spawnCodexAppServer(
   options: SpawnCodexAppServerOptions = {},
 ): CodexAppServerProcess {
   const command = options.command ?? "codex";
+  const platform = options.platform ?? process.platform;
   const sourceEnv = options.env ?? process.env;
   const env: NodeJS.ProcessEnv = {
     ...sourceEnv,
-    PATH: buildElectronSafePath(sourceEnv.PATH, sourceEnv.HOME),
+    PATH: buildElectronSafePath(
+      sourceEnv.PATH,
+      sourceEnv.HOME,
+      platform,
+      sourceEnv.APPDATA,
+    ),
   };
   (
     options.versionCheck ??
     ((binary, commandEnv) => {
-      assertCodexCliVersion({ command: binary, env: commandEnv });
+      assertCodexCliVersion({
+        command: binary,
+        env: commandEnv,
+        platform,
+        fileExists: options.fileExists,
+        comspec: options.comspec,
+      });
     })
   )(command, env);
+  const commandSpec = buildCodexProcessSpec(
+    command,
+    ["app-server", "--listen", "stdio://"],
+    {
+      platform,
+      env,
+      fileExists: options.fileExists,
+      comspec: options.comspec,
+    },
+  );
   const spawn = options.spawn ?? (nodeSpawn as unknown as AppServerSpawn);
-  const child = spawn(command, ["app-server", "--listen", "stdio://"], {
+  const child = spawn(commandSpec.file, commandSpec.args, {
     cwd: options.cwd,
     env,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
+    windowsVerbatimArguments: commandSpec.windowsVerbatimArguments,
   });
 
   const maxStderrBytes = options.maxStderrBytes ?? DEFAULT_MAX_STDERR_BYTES;
@@ -107,6 +138,11 @@ export function spawnCodexAppServer(
     if (stderr.length > maxStderrBytes) {
       stderr = stderr.subarray(stderr.length - maxStderrBytes);
     }
+  });
+  child.stdin.on("error", (error) => {
+    if (exited) return;
+    settle(null, null, error);
+    child.kill("SIGTERM");
   });
   child.on("error", (error) => settle(null, null, error));
   child.on("close", (code, signal) => settle(code, signal));

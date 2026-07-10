@@ -280,7 +280,8 @@ export class JsonlTransport {
         );
         return;
       }
-      this.respond(request.id, await this.options.onServerRequest(request));
+      const result = await this.options.onServerRequest(request);
+      this.respond(request.id, result === undefined ? null : result);
     } catch (error) {
       if (!this.disposedError) {
         this.respondError(request.id, -32603, asError(error).message);
